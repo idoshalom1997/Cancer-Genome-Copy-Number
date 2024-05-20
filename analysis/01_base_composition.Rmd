@@ -1,0 +1,355 @@
+---
+title: "What is chromosome 1 made of?"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 20 May, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+### Libraries used
+
+```{r libraries,warning=FALSE}
+# Load libraries
+library("reshape2")
+library("rmarkdown")
+library("ggplot2")
+
+```
+
+### Paths and Data
+
+```{r paths}
+
+# Load the data
+load(file = 'data/chr1_str_30M_50M.rda')
+```
+
+## Introduction
+
+In this week task we want to investigate a segment of 20 million bases in the reference genome of a human chromosome - chromosome No.1 .
+
+Our main goal is to show how the different bases are distributed in the chromosome and perhaps understand better the structure of chromosome.
+
+
+## Part A: Reading chromosome 1 (Team B)
+
+
+```{r}
+# Split letters 
+my_data = strsplit(chr1_str_30M_50M, '')[[1]][-1]
+
+# Count bases in total
+table(my_data)
+
+```
+
+This is our original distribution,but it's a bit hard to see the proportions - so we will round it up.
+
+
+
+```{r}
+# Round for better understanding 
+round(table(my_data),-4)
+```
+
+**Results Explanations:**
+
+Theoretically, we would expect an even distribution along the genome, meaning more or less 5 million per base.
+
+Here, we can already see more clearly that in practice the bases A, T appear more by about 9-10 percent than we would expect, while the bases C, G appear are 9-10 percent less.
+
+
+## Part B: function for the number of appearances of the bases in the cell
+
+We first determined the total length of the genome. 
+
+We then iterated over the genome in increments equal to the specified cell size. 
+
+Within each segment, we use `sapply` along with `charToRaw` to compare each character against the DNA bases,counting their occurrences in each cell. 
+
+Finally, our function returned this list of base counts which we will apply on the genome with cell defined to size 1000.
+
+
+Of course, we will not display the 20,000 cases as a table because it will not be clear, and therefore in Part C, we will use the function to display each basis histogram. 
+
+
+```{r}
+# set up the function 
+sum_bases_in_cells <- function(genome, cell_size) {
+  genome_length <- nchar(genome)
+  
+  # Initialize list to store results
+  base_counts_per_cell <- list()
+  
+  # Iterate over the genome by cell_size
+  for (start in seq(1, genome_length, by = cell_size)) {
+    end <- min(start + cell_size - 1, genome_length)
+    cell <- substring(genome, start, end)
+    
+    # Count bases in the cell
+    counts <- sapply(c("A", "C", "G", "T"), function(base) {
+      sum(charToRaw(cell) == charToRaw(base))
+    }, USE.NAMES = TRUE)
+    
+    # Append counts to the list
+    base_counts_per_cell[[length(base_counts_per_cell) + 1]] <- counts
+  }
+  
+  return(base_counts_per_cell)
+}
+
+base_counts <- sum_bases_in_cells(chr1_str_30M_50M, 1000)
+
+
+```
+
+
+## Part C: Histogram of the distribution of bases
+
+
+```{r}
+# Function to plot histograms and show descriptive statistics 
+plot_base_histograms <- function(base_counts, base) {
+  counts <- sapply(base_counts, "[[", base)
+  if (base == "A") {
+    counts <- counts[counts != 1]
+  } else {
+    counts <- counts[counts > 0]
+  }
+
+  # Create histogram 
+  hist_obj = hist(counts, breaks=50, xlab = paste(base, "Count"), ylab = "Frequency",
+       main = paste("Distribution of", base, "in Bins"), col = "skyblue", border = "black")
+  
+  # Calculate descriptive statistics
+  stats <- c(
+    Min = min(counts),
+    Q1 = quantile(counts, 0.25),
+    Median = median(counts),
+    Mean = mean(counts),
+    Q3 = quantile(counts, 0.75),
+    Max = max(counts),
+    SD = sd(counts)
+  )
+  
+  # Format statistics as text
+  stats_text <- paste(names(stats), format(stats, digits = 3), sep = ": ", collapse = "\n")
+  
+  cat("\nStatistics for", base, ":\n", stats_text, "\n\n")
+}
+
+
+# Plot histograms for each base 
+plot_base_histograms(base_counts, "A")
+plot_base_histograms(base_counts, "C")
+plot_base_histograms(base_counts, "G")
+plot_base_histograms(base_counts, "T")
+
+```
+
+
+**Results Explanations:**
+
+What we can learn from the statistical variables that there is a tendency for an excess of A & T bases and a lack of G & C bases not only in the genome itself, but also along the entire length of the genome on average.
+
+That is, if we expect to see some kind of uniform distribution all over the genome in terms of bases (with 250 appearances per base), that is not the case. 
+The variance here is much greater than the expected binomial variance distribution.
+
+
+## Part D: Frequency of each of the bases against the position in the chromosome
+
+In the graphs below, we can see the position on the chromosome of each of the bases in the following order:
+
+The first plot - A
+
+The second plot - C
+
+The third plot - G 
+
+The fourth plot - T 
+
+Note that, unlike previous sections, here we chose to set a cell to a size of 2000 bases out of a desire for better visualization (10,000 cells instead of 20,000)
+
+
+```{r}
+# The Chromosome 1
+genome <- chr1_str_30M_50M 
+
+# Define bin size and calculate number of bins
+bin_size <- 2000
+genome_length <- nchar(genome)
+n_bins <- ceiling(genome_length / bin_size)
+
+# Initialize matrix to store counts of each base per bin
+let_count <- matrix(0, nrow = n_bins, ncol = 4)
+colnames(let_count) <- c("A", "C", "G", "T")
+
+# Count bases in each bin
+for (i in 1:n_bins) {
+  start_bin <- 1 + (i - 1) * bin_size
+  end_bin <- min(i * bin_size, genome_length)
+  segment <- substring(genome, start_bin, end_bin)
+  
+  for (let in 1:4) {
+    let_count[i, let] = sum(charToRaw(segment) == charToRaw(colnames(let_count)[let]))
+  }
+}
+
+# Change the margins and set up for multiple plots
+par(mfcol = c(4,1), mar = c(1, 0, 0, 0), oma = c(5, 4, 0, 0))
+
+# Plotting each base frequency
+for (i in 1:4) {
+  plot(seq(0, genome_length, by = bin_size) / 1e6, let_count[,i]/bin_size, pch = 20, cex = 0.5,
+       xlab = ifelse(i == 4, "Location on Chromosome (Millions)", ""), 
+       ylab = "", yaxt = 'n', main = "")  
+}
+
+# Adding a central X-axis label
+mtext("Location on Chromosome (Millions)", side = 1, outer = TRUE, line = 3)
+
+# Adding a central Y-axis label for the entire plot
+mtext("Frequency", side = 2, outer = TRUE, line = 3)
+
+
+
+```
+
+**Results Explanations:**
+
+It can be seen that in general the variation here is relatively high.
+
+Bases A & T have the highest variance,base G has a slightly lower variance and base C has the lowest variance.
+
+If we look at the general trend, it seems that the location of the points has a fairly similar structure, that is, the change of the points may not be at the same level of spread in the different bases, but they do maintain some sort of continuous trend.
+
+
+## Part E: Frequency of a pair of bases in the same cell
+
+```{r}
+# Convert the let_count matrix to a data frame for easier manipulation
+base_counts_df <- as.data.frame(let_count)
+colnames(base_counts_df) <- c("A", "C", "G", "T")
+
+# Initialize a list to store outlier indices for each base pair
+outlier_indices_list <- list()
+
+# Set up a 2x3 plot layout for the 6 unique combinations
+par(mfrow = c(2, 3), mar = c(4, 4, 2, 1))
+
+# Plotting loop for each unique base combination
+for (i in 1:3) {
+    for (j in (i+1):4) {
+        plot(base_counts_df[,i], base_counts_df[,j], 
+             xlab = "", ylab = "", 
+             main = paste(colnames(base_counts_df)[i], "vs", colnames(base_counts_df)[j]),
+             pch = 20, col = rgb(0, 0, 1, 0.5), cex = 0.6)
+
+        # Linear regression line
+        model <- lm(base_counts_df[,j] ~ base_counts_df[,i])
+        abline(model, col = "green")
+
+        # Calculate and sort residuals
+        residuals <- abs(resid(model))
+        sorted_indices <- order(-residuals) 
+
+        # Highlight the next top 5 residuals in deep pink (positions 2 to 6)
+        if (length(sorted_indices) > 6) { 
+            top_5_indices <- sorted_indices[2:6] # Skip the (0,0), select the next five
+            points(base_counts_df[top_5_indices, i], base_counts_df[top_5_indices, j], 
+                   col = "deeppink", pch = 20, cex = 0.9)
+
+            key <- paste(colnames(base_counts_df)[i], colnames(base_counts_df)[j], sep="_")
+            outlier_indices_list[[key]] <- top_5_indices
+        }
+    }
+}
+
+```
+
+
+
+### A. What is the trend?
+
+In terms of theory, we would expect to see a negative trend for each pair of bases - that is, if we were to draw the multinomial distribution with the expectation of an equal amount of bases in each cell - the correlation would necessarily be negative.
+
+Based on our data, it doesn't seem to be the case for every base pair - which could indicate other features beneath the surface.
+
+As expected, we found out that for bases that do not form a pair (like A-C for example) there is a negative correlation, but for the combination of the pairs C-G (in A-T it is less clear what the trend is) we actually received a positive correlation.
+
+For the A-T Combinations we can see that for smaller value there is a positive correlation and for bigger values there is a negative one,again as expected.
+
+**Note**: We did not consider the (0,0) point as an outlier because this point is irrelevant in our opinion.
+
+### B. Are there any outlier cell?
+
+So, we use the residuals to determined what consider an outlier (in "deeppink" color). 
+
+what's seems to unique them is that big part of them are above the regression line and not under it (except from the G-T case). 
+
+That mostly emphasis the negative correlation, if they are both bigger it's not standard. 
+
+### C. where these cells are on the chromosome?
+
+
+```{r}
+bin_size <- 2000  # Size of each bin
+genome_start <- 1  # Starting position 
+
+# Function to map indices to genomic coordinates
+get_genomic_coordinates <- function(indices) {
+    data.frame(
+        Start = genome_start + (indices - 1) * bin_size,
+        End = genome_start + indices * bin_size - 1
+    )
+}
+
+# Apply this function to each set of indices 
+genomic_coordinates <- lapply(outlier_indices_list, get_genomic_coordinates)
+
+# Print the genomic coordinates
+print(genomic_coordinates)
+
+```
+
+
+We divided the length of the genome into 4 quarters according to location and got that the outliers distribution is:
+
+0-5M - 16.67% 
+
+5M-10M - 6.67% 
+
+10M- 15M - 53.33% 
+
+15M- 20M - 23.33% 
+
+This distribution suggests that the third quarter of the genome (10M-15M) contains a significantly higher proportion of outliers compared to the other quarters. 
+
+It could imply that this region might be particularly significant in some way, potentially genetic elements that diverge significantly from the norm.
+
+
+## Part F: Base pairs that behave "similarly" in our eyes
+
+
+We believe that the pairs with "similar" behavior are A-T and C-G.
+
+We know that this is perhaps an obvious choice in terms of the logic of the DNA's behavior, but also in terms of all the elements tested in this task (identical histograms, similar distribution on the position on the chromosome and even the position of the outliers), we can quite clearly see the similarity in their behavior. 
+
+## Short summary
+
+The task helps us to better understand how different DNA bases tend to group together or show up near each other along the DNA.
+
+We believe that if we enrich our knowledge of genome attributes in general, this grouping might tell us something about what these DNA bases do or special characteristics of the DNA region they're in.
+
