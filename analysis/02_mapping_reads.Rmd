@@ -1,0 +1,496 @@
+---
+title: "Where do sequencing reads land on the chromosome?"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 28 May, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(hrbrthemes)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+```
+
+
+### Paths and Data
+
+```{r paths}
+
+# Loading file path where the reads data is stored 
+reads_file = 'data/raw/TCGA-13-0723-01A_lib1_all_chr1.forward'
+
+# Load chromosome 1 reads
+chr1_reads = fread(reads_file) 
+
+# Adding relevant columns names
+colnames(chr1_reads) = c("Chrom","Loc","FragLen")   
+
+# Display summary
+summary(chr1_reads)
+
+```
+
+
+## Introduction
+
+In this week's task, we will continue our ongoing exploration of chromosome 1 in the human genome, by focusing on the mapping files to examine how DNA fragments are distributed.
+
+In practice, this should represent the part that prepares for checking whether there are mutations or unwanted duplication in some parts of the chromosome.
+
+
+## Part A: Function for Recording Fragment Start Points
+
+For this part, we will demonstrate two functions:
+a 'Slow' one and a 'Fast' one.
+We will also assess reliability for the fast function - whether it perform the tasks as intended.
+
+The 'slow' function, "count_reads" ,needs to perform nearly 12 million (number of rows in the data) equation operations and then sum up this 12 million-length vector for each index of the chromosome.
+If we were to implement it on the entire chromosome, it would require 250 million iterations like this.
+Even in our case, for the 20 million segment, it is quite a lot of work.
+
+On the other hand, the 'fast' function,"getReadLine" utilizes the fact that the 'Loc' column is sorted.
+It can move one index at a time according to the locations in the chromosome that mark the beginning of a read.
+Once it finishes with a specific index, it retains it in the vector.
+This method saves us the trouble of manually checking each index of the chromosome and also, thanks to the sorting, there is no need to go back and check for more appearances of a specific index.
+
+**Slow function:**
+
+```{r}
+# The "Slow" function 
+count_reads <- function(locations, beg_region, end_region)
+{
+  tic()
+  # Create a vector to store the counts
+  count_loc <- integer(end_region - beg_region + 1) 
+  # Count occurrences of each location
+  for (location in 1:200) 
+  {
+      count_loc[location] <- sum(chr1_reads$Loc == 
+                                (location + beg_region - 1))
+  }
+  toc()
+  return(count_loc)
+}
+# Define start & end for the 20M segment
+beg_region <- 1
+end_region <- 20000000
+
+# A vector to store the function output
+read_results <- count_reads(chr1_reads$Loc, beg_region,end_region)
+
+```
+
+*Note:* we of course did not preformed the function on all the 20M because it would have take us a lot of time
+
+
+**Fast function:**
+
+
+```{r}
+# faster function using the structure from class
+getReadLine = function(locations, beg_region, end_region){
+  tic()  
+  
+  # Filter locations within the wanted range
+  filtered_locations <- locations[locations >= beg_region & locations <= end_region]
+  
+  # Create a vector to store the counts, initializing to zero
+  count_loc <- integer(end_region - beg_region + 1)
+  
+  # Count occurrences of each location
+    for (location in filtered_locations) {
+      position_index <- location - beg_region + 1
+      count_loc[position_index] <- count_loc[position_index] + 1
+      }
+  
+  toc()  
+  return(count_loc)
+}
+
+# Define the region we want to analyze
+beg_region <- 1
+end_region <- 20000000
+
+# Using the function and save results to a vector
+frag_vec <- getReadLine(chr1_reads$Loc, beg_region, end_region)
+
+
+# Printing total fragments
+total_fragments <- sum(frag_vec)
+cat("Total fragments in the specified region: ", total_fragments, "\n")
+
+```
+**checking function**
+
+As we mentioned before, we wanted to check if the function is performing well.
+We created a validation function that selects 10 random positions and returns 'TRUE' if, for the specific position, the number of rows in the data is equal to the count in the fast function's result vector.
+
+We also chose to exclude 0 count values to give the randomness greater significance
+
+
+```{r}
+# Function to validate the results of getReadLine 
+validate_read_counts <- function(fast_func_output, chr1_reads, beg_region, end_region) {
+  
+  # Filter positions with at least one read
+  valid_positions <- unique(chr1_reads$Loc[chr1_reads$Loc >= beg_region & chr1_reads$Loc <= end_region])
+  
+  random_positions <- sample(valid_positions, 10)
+  
+  # Initialize vectors to store expected and obtained counts
+  expected_counts <- integer(10)
+  obtained_counts <- integer(10)
+  
+  # Loop over each random position 
+  for (i in 1:10) {
+    position <- random_positions[i]
+    expected_counts[i] <- sum(chr1_reads$Loc == position)
+    obtained_counts[i] <- fast_func_output[position - beg_region + 1]
+  }
+  
+  # Create a data frame to store and display the validation results
+  results <- data.frame(
+    Position = random_positions,
+    Expected = expected_counts,
+    Obtained = obtained_counts,
+    Match = expected_counts == obtained_counts
+  )
+  
+  return(results)
+}
+
+# Implementing the validation function
+validation_results <- validate_read_counts(frag_vec, chr1_reads, beg_region, end_region)
+print(validation_results)
+
+
+```
+
+
+## Part B: Visualization of Marginal Coverage
+
+The histogram below represents marginal coverage.
+It is essentially the implementation of the fast function from Part A.
+
+For each of the bases on the 20 million length segment we chose, it shows how many times a fragment starts at that specific base, and according to that number, it places it in the appropriate column on the histogram.
+
+
+```{r, warning=FALSE}
+# Convert frag_vec to a data frame 
+data_for_hist <- data.frame(frag_vec)
+
+# Find the last read position 
+last_read <- max(which(frag_vec > 0))
+
+# Calculate average coverage 
+average_coverage <- total_fragments / last_read
+
+# Calculate the counts for each bin manually to apply custom labels
+bin_counts <- data_for_hist %>%
+  count(frag_vec) %>%
+  mutate(label = case_when(
+    n >= 1e6 ~ paste0(round(n / 1e6, 1), "M"),
+    n >= 1e3 ~ paste0(round(n / 1e3, 1), "K"),
+    TRUE ~ as.character(n)
+  ))
+
+# Plotting the histogram 
+plot_hist <- ggplot(data_for_hist, aes(x = frag_vec)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "#e9ecef", alpha = 0.9, boundary = -0.5) +
+  geom_text(data = bin_counts, aes(x = frag_vec, y = n, label = label), vjust = -0.3, hjust = 0.55, color = "black", size = 2.6, check_overlap = TRUE) +
+  geom_vline(aes(xintercept = average_coverage, color = "AVG coverage line"), size = 0.75, linetype = "dashed") +
+  scale_y_continuous(
+    breaks = c(0, 5e6, 10e6, 15e6, 20e6),
+    labels = c("0", "5M", "10M", "15M", "20M"),
+    limits = c(0, 20e6)
+  ) +
+  xlab("Number of Fragments") +
+  ylab("Frequency") +
+  ggtitle(paste("Average coverage:", round(average_coverage, 3))) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  ) +
+  scale_color_manual(name = "", values = c("AVG coverage line" = "red")) +
+  guides(color = guide_legend(override.aes = list(linetype = "dashed")))
+
+# Display the plot
+print(plot_hist)
+
+
+
+```
+
+
+**Results Explanations:**
+
+When we examine the histogram results, we observe that approximately 93.5% of the bases from the chosen 20 million length segment are placed in the 0 column.
+This indicates that not a single fragment starts from these bases.
+
+We can also see that roughly 6% of the bases have one fragment starting from them, which leaves only 0.5% for all other cases.
+
+This emphasizes why the Average Coverage is 0.068, which is very close to 0
+
+
+## Part C: Function for Fragment Counts by Cell Size
+
+As recommended, we first wrote a general function for counting fragments by cell size.
+
+The function receives a fragment vector, which in our case is the 'Loc' column from the original data or our 20M chosen segment, and a cell size, which we defined as 20,000 bases per cell.
+
+After defining the cell size, the function simply sums up the number of fragments for each cell based on the cell indexes
+
+
+```{r}
+# Function to calculate the number of fragments in each cell
+calculateFragmentsPerCell <- function(fragment_vector, cell_size) {
+  # Number of cells to cover the whole region
+  num_cells <- ceiling(length(fragment_vector) / cell_size)
+  
+  # Initialize vector to store fragment counts per cell
+  fragments_per_cell <- integer(num_cells)
+  
+  # Sum fragments for each cell
+  for (i in 1:num_cells) {
+    start_index <- (i - 1) * cell_size + 1
+    end_index <- min(i * cell_size, length(fragment_vector))
+    fragments_per_cell[i] <- sum(fragment_vector[start_index:end_index])
+  }
+  
+  return(fragments_per_cell)
+}
+
+
+```
+
+
+
+### 1. Reads Distribution Across the Chromosome
+
+For the reads distribution across the entire chromosome, we set the benchmark for the length of chromosome 1 to be 250 million bases.
+
+This is based on the size discussed in class and further confirmed through research on Google.
+
+After setting this, we use the fast function from Part A to implement the fragment count across the full chromosome.
+Then, we apply the general function we created in the begging of part C, to adjust the count to be per cell size of 20,000 bases.
+
+Finally, we output a graph, the results of which we explain below.
+
+```{r, warning=FALSE}
+# Define the chromosome 1 size
+beg_region_full <- 1
+end_region_full <- 250000000
+
+# Calculate fragment counts 
+frag_vec_full <- getReadLine(chr1_reads$Loc, beg_region_full, end_region_full)
+
+# Calculate fragments for the whole chromosome per cell size
+cell_size_full_chromosome <- 20000
+whole_chromosome_frags <- calculateFragmentsPerCell(frag_vec_full, cell_size_full_chromosome)
+
+# Data frame for plotting
+data_full <- data.frame(Cell = 1:length(whole_chromosome_frags), Fragments = whole_chromosome_frags)
+
+# Identify outliers in the first 1000 cells
+data_full$outlier <- ifelse(data_full$Fragments > 2500 & 1:nrow(data_full) <= 1000, "Outlier >2.5k", "Normal")
+
+plot_full <- ggplot(data_full, aes(x = Cell, y = Fragments, fill = "Normal")) +
+  geom_bar(stat = "identity") +
+  geom_point(data = subset(data_full, outlier == "Outlier >2.5k"), 
+             aes(x = Cell, y = Fragments, color = outlier), size = 1) +
+  geom_vline(xintercept = 1000, linetype = "dashed", color = "black", size = 0.43) +
+  xlab("Cell (20k bases each)") +
+  ylab("Number of Fragments") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Normal" = "steelblue")) +
+  scale_color_manual(values = c("Outlier >2.5k" = "deeppink")) +
+  ylim(0, 5000) + 
+  guides(fill = FALSE) + 
+  theme(legend.position = "top right") +
+  scale_x_continuous(breaks = c(0, 1000, 4000, 8000, 12000), labels = c("0", "1000", "4000", "8000", "12000"))
+
+# Print the plot
+print(plot_full)
+
+
+
+```
+
+**Results Explanations:**
+
+As we can see and calculate, we have a total of 12,500 cells, each consisting of 20,000 bases.
+
+Obviously, the plot does not display each cell, but it does give us a sneak peek at the frequency of reads along the chromosome.
+
+Moreover, we can observe that there are many cells without any fragments starting from one of the bases within them.
+The 'Longest zero sequence' starts from cell number 6061 and ends at cell 7073.
+
+This results in a continuous sequence of roughly 20,260,000 bases with no fragments starting from them (if we had chosen this segment of over 20 million bases for our analysis, we would not have been able to conduct any analysis).
+
+For reference, generally, we found that there are 1,227 cells with zero fragments, which is slightly under 10% of the total cells.
+
+*Note:* We also marked in the plot the section of our chosen 20 million segment, and for validation, we highlighted in pink the 'outliers' or more significant trends, as we will see in the 'Zoom-in' plot
+
+
+### 2. View of Reads Distribution in a 20 Million Base Segment
+
+This function operates essentially the same way as the one in part C1, only this time it examines only the 20 million base segment that we chose (after division into cell sizes of 20,000).
+
+
+```{r}
+# Calculate fragments for the 20 million base window 
+cell_size_window <- 20000
+window_frags <- calculateFragmentsPerCell(frag_vec, cell_size_window)
+
+# Data frame for plotting
+data_window <- data.frame(Cell = 1:length(window_frags), Fragments = window_frags)
+
+# Calculate mean and standard deviation
+mean_fragments <- mean(data_window$Fragments)
+sd_fragments <- sd(data_window$Fragments)
+
+# Upper and lower bounds using mean +/- 2*SD
+upper_bound <- mean_fragments + 2 * sd_fragments
+lower_bound <- mean_fragments - 2 * sd_fragments
+
+# Plot for the 20 million base window
+plot_window <- ggplot(data_window, aes(x = Cell, y = Fragments)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  xlab("Cell (20k bases each)") +
+  ylab("Number of Fragments") +
+  geom_hline(yintercept = upper_bound, linetype = "dashed", color = "red", size = 0.6) +
+  geom_hline(yintercept = lower_bound, linetype = "dashed", color = "red", size = 0.6) +
+  geom_hline(yintercept = mean_fragments, linetype = "dashed", color = "black", size = 0.6) +
+  geom_text(aes(x = 0, y = upper_bound, label = "UB", hjust = 0.7, vjust = -0.75, color = "black"), size = 3) +
+  geom_text(aes(x = 0, y = lower_bound, label = "LB", hjust = 0.7, vjust = -0.75, color = "black"), size = 3) +
+  geom_text(aes(x = 0, y = mean_fragments, label = "AVG", hjust = 0.7, vjust = -0.75), size = 3) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Print the plot
+print(plot_window)
+
+
+
+```
+
+
+**Results Explanations:**
+
+After zooming in, we obtained 1,000 cells, each with a size of 20,000.
+
+We used the standard approach of defining normal and outlier areas.
+
+We calculated the mean plus or minus two standard deviations in each direction, and obtained:
+
+UB: 2342
+
+AVG: 1358
+
+LB: 374
+
+The results of this analysis in terms of outliers were:
+
+The first quarter (0-250): 49%
+
+The second quarter (250-500): 3%
+
+The third quarter (500-750): 36%
+
+The fourth quarter (750-1000): 12%
+
+We might conclude that the first and third quarters are problematic, and may indicate areas where the cells are not as they should be as opposed to healthy/normal cells.
+
+
+## Part D: Fit & Visualization of the Nearest Normal Distribution for the Reads
+
+This part is a kind of larger-scale implementation of Part B.
+For each cell, we check how many reads it has, and then we count how many cells have the same number of reads.
+
+We chose to remove about 12% of the outliers for better visualization and only kept the cells that have at least 300 reads and fewer than 1900.
+
+
+```{r,warning=FALSE}
+# Use the full chromosome 1 data 
+data_to_analyze <- data_full  
+
+# Filtering the relevant data 
+filtered_data <- subset(data_to_analyze, Fragments >= 300 & Fragments <= 1900)
+removed_data <- subset(data_to_analyze, Fragments < 300 | Fragments > 1900)
+
+# Fit a normal distribution to the relevant data
+fit_normal <- fitdist(filtered_data$Fragments, "norm")
+
+# Plotting the histogram
+h <- hist(filtered_data$Fragments, breaks = seq(300, 1900, by = 10), main = "", 
+          xlab = "Number of Reads per Cell", ylab = "Frequency", border = "darkgrey", col = "steelblue", xlim = c(300, 1900))
+
+# Adding normal distribution curve 
+curve(dnorm(x, mean = mean(filtered_data$Fragments), sd = sd(filtered_data$Fragments)) * diff(h$mids[1:2]) * length(filtered_data$Fragments), 
+      add = TRUE, col = "coral", lwd = 3, lty = 2)
+
+# Adding our distribution curve
+kde <- density(filtered_data$Fragments, adjust=1, from=300, to=1900)
+kde_interp <- approxfun(kde$x, kde$y * diff(h$mids[1:2]) * length(filtered_data$Fragments))
+curve(kde_interp(x), from=300, to=1900, add = TRUE, col = "brown", lwd = 3, lty = 2)
+
+# Adding a legend to the plot
+legend("topright", legend=c("Normal Distribution", "Our Distribution"),
+       col=c("coral", "brown"), lwd=2, lty=2, cex=0.7)
+
+
+```
+
+
+**Results Explanations:**
+
+As we can see, our data distribution does not seem to resemble the normal distribution with the same statistical parameters.
+
+For our distribution, we got a 'two-humped distribution,' which often implies a combination of two separate distributions that merge into one.
+
+AVG for our distribution: `r mean(filtered_data$Fragments)`
+
+SD for our distribution: `r sd(filtered_data$Fragments)`
+
+
+## Short summary
+
+The assumption of the "uniform distribution" that we might have expected for the distribution of the fragments, did not stand the test of reality.
+
+At least according to our data, it seems that a significant part of the bases of the chromosome is still not deciphered.
+
+When it comes to large-scale data, the validation of the code commands and outputs is of utmost importance.
+
+
+
