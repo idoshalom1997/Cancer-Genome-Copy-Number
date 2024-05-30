@@ -1,0 +1,653 @@
+---
+title: "Is read coverage random? A Poisson model and the GC effect"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 4 June, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(hrbrthemes)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+```
+
+
+### Paths and Data
+
+
+```{r paths}
+
+# Loading file path where the reads data is stored 
+reads_file = 'data/raw/TCGA-13-0723-01A_lib1_all_chr1.forward'
+
+# Load chromosome 1 reads
+chr1_reads = fread(reads_file) 
+
+# Adding relevant columns names
+colnames(chr1_reads) = c("Chrom","Loc","FragLen")   
+
+# Load the data for Question 2
+load(file = 'data/chr1_line.rda')
+
+summary(chr1_line)
+```
+
+
+## Introduction
+
+In this week's task, we have two main goals:
+
+1.We want to compare our data of chromosome 1 reads and its distribution to the uniform Poisson model.
+
+2.We want to do a GC comparison to the coverage (number of reads) in the cell and examine the correlation between them
+
+
+## Part A: Comparison with a uniform Poisson model
+
+
+### Question 1: 
+
+For convenience, we have divided this question into several steps:
+
+At the beginning we again defined the function from lab 2 Part A including the calculation of the average coverage.
+
+
+```{r, warning=FALSE}
+# function from Lab 2
+getReadLine <- function(locations, beg_region, end_region){
+  filtered_locations <- locations[locations >= beg_region & locations <= end_region]
+  
+  # Create a vector to store the counts, initializing to zero
+  count_loc <- integer(end_region - beg_region + 1)
+  
+  # Count occurrences of each location
+  for (location in filtered_locations) {
+    position_index <- location - beg_region + 1
+    count_loc[position_index] <- count_loc[position_index] + 1
+  }
+  
+  return(count_loc)
+}
+
+# Define the region we want to analyze
+beg_region <- 1
+end_region <- 20000000
+
+# Using the function and save results to a vector
+frag_vec <- getReadLine(chr1_reads$Loc, beg_region, end_region)
+
+# Calculate the total number of fragments
+total_fragments <- sum(frag_vec)
+
+# Convert frag_vec to a data frame 
+data_for_hist <- data.frame(frag_vec)
+
+# Find the last read position 
+last_read <- max(which(frag_vec > 0))
+
+# Calculate average coverage 
+average_coverage <- total_fragments / last_read
+```
+
+
+
+After that, we used the same concept as used in the function from lab 2 Part B which is basically an implementation of the above function and produces the same histogram for our data.
+
+
+
+```{r, warning=FALSE}
+# Our data distribution
+observed_counts <- table(cut(frag_vec, breaks = c(-1, 0:5, Inf), labels = c(0:5, ">5")))
+observed_probs <- observed_counts / sum(observed_counts)
+
+# Create a data frame for our data distribution 
+observed_counts_df <- data.frame(
+  Coverage = factor(c(0:5, ">5"), levels = c(0:5, ">5")),
+  Observed = as.numeric(observed_counts)
+)
+
+# Apply custom labels for better visualization
+observed_counts_df <- observed_counts_df %>%
+  mutate(label = case_when(
+    Observed >= 1e6 ~ paste0(round(Observed / 1e6, 2), "M"),
+    Observed >= 1e3 ~ paste0(round(Observed / 1e3, 2), "K"),
+    TRUE ~ as.character(round(Observed, 2))
+  ))
+
+# Plotting the histogram 
+observed_hist <- ggplot(observed_counts_df, aes(x = Coverage, y = Observed)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "#e9ecef", alpha = 0.9, boundary = -0.5) +
+  geom_text(aes(label = label), vjust = -0.3, hjust = 0.55, color = "black", size = 2.6, check_overlap = TRUE) +
+  scale_y_continuous(
+    breaks = c(0, 5e6, 10e6, 15e6, 20e6),
+    labels = c("0", "5M", "10M", "15M", "20M"),
+    limits = c(0, 20e6)
+  ) +
+  xlab("Number Of Reads") +
+  ylab("Observed Frequency") +
+  ggtitle("Observed Coverage Distribution") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    legend.position = "none"
+  )
+```
+
+
+Now, we will generate data with a size of 20M samples from a Poisson distribution in a random way and with a $\lambda$  equal to the coverage mean:
+
+$$
+Z \sim \text{Poisson}(\lambda = \text{Average Coverage} \approx 0.068)
+$$
+
+
+let's take the 2 histograms we got and plot them on one graph side by side to show similarity between the distributions
+
+
+
+```{r,warning=FALSE}
+# Generate the expected distribution for a uniform Poisson model
+coverage_values <- 0:5
+poisson_probs <- dpois(coverage_values, lambda = average_coverage)
+poisson_probs <- c(poisson_probs, 1 - sum(poisson_probs))  # Add probability for "> 5"
+
+# Create a data frame for expected Poisson distribution 
+expected_counts <- data.frame(
+  Coverage = factor(c(0:5, ">5"), levels = c(0:5, ">5")),
+  PoissonExpected = round(poisson_probs * sum(observed_counts))
+)
+
+# Apply custom labels for better visualization
+expected_counts <- expected_counts %>%
+  mutate(label = case_when(
+    PoissonExpected >= 1e6 ~ paste0(round(PoissonExpected / 1e6, 2), "M"),
+    PoissonExpected >= 1e3 ~ paste0(round(PoissonExpected / 1e3, 2), "K"),
+    TRUE ~ as.character(round(PoissonExpected, 2))
+  ))
+
+# Plotting the histogram 
+expected_hist <- ggplot(expected_counts, aes(x = Coverage, y = PoissonExpected)) +
+  geom_bar(stat = "identity", fill = "magenta", color = "#e9ecef", alpha = 0.9, boundary = -0.5) +
+  geom_text(aes(label = label), vjust = -0.3, hjust = 0.55, color = "black", size = 2.6, check_overlap = TRUE) +
+  scale_y_continuous(
+    breaks = c(0, 5e6, 10e6, 15e6, 20e6),
+    labels = c("0", "5M", "10M", "15M", "20M"),
+    limits = c(0, 20e6)
+  ) +
+  xlab("Number Of Reads") +
+  ylab("Expected Frequency") +
+  ggtitle("Expected Poisson Distribution") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12, angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    legend.position = "none"
+  )
+
+
+# Display the plots side by side
+grid.arrange(observed_hist, expected_hist, ncol = 2)
+```
+
+
+As Requested, we also added a small table to show how many times a fragment starts at that specific base, and according to that number, it places it in the appropriate row on the table for but distributions.
+
+
+```{r, warning=FALSE}
+
+# format for better visualization in the table
+format_counts <- function(x) {
+  if (x >= 1e6) {
+    paste0(round(x / 1e6, 2), "M")
+  } else if (x >= 1e3) {
+    paste0(round(x / 1e3, 2), "K")
+  } else {
+    as.character(x)
+  }
+}
+
+# Create the table
+comparison_table <- data.frame(
+  NumberOfReads = c(0:5, ">5"),
+  Observed = sapply(as.numeric(observed_counts), format_counts),
+  Expected = sapply(round(poisson_probs * sum(observed_counts)), format_counts)
+)
+
+# Rename the column "NumberOfReads" to "Number Of Reads"
+colnames(comparison_table)[1] <- "Number Of Reads"
+
+# Print the table
+print(comparison_table)
+
+```
+
+
+**Results Explanations:**
+
+As we might expect, it can be seen that the variance of our data is significantly greater than the variance of the expected Poisson distribution. There is much more 'noise' in our data.
+
+
+### Question 2:
+
+In this question, we aim to generalize the concept introduced in the first one. We take the entire chromosome 1 (250M bases) and divide it into cells of 10K bases each.
+
+We use the Lab 2 Part C function to count the number of reads in each cell and calculate the average coverage for the whole chromosome.
+
+
+```{r,warning=FALSE}
+# Define the region and cell size
+beg_full <- 1
+end_full <- 250000000
+cell_size <- 10000
+
+# Using the function and save results to a vector
+frag_vec_full <- getReadLine(chr1_reads$Loc, beg_full, end_full)
+
+# Calculate the total number of fragments
+total_fragments_full <- sum(frag_vec_full)
+
+# Convert frag_vec to a data frame 
+data_for_hist_full <- data.frame(frag_vec_full)
+
+# Calculate average coverage 
+average_coverage_full <- total_fragments_full / end_full
+
+# Function to calculate the number of fragments in each cell
+calculateFragmentsPerCell <- function(fragment_vector, cell_size) {
+  # Number of cells to cover the whole region
+  num_cells <- ceiling(length(fragment_vector) / cell_size)
+  
+  # Initialize vector to store fragment counts per cell
+  fragments_per_cell <- integer(num_cells)
+  
+  # Sum fragments for each cell
+  for (i in 1:num_cells) {
+    start_index <- (i - 1) * cell_size + 1
+    end_index <- min(i * cell_size, length(fragment_vector))
+    fragments_per_cell[i] <- sum(fragment_vector[start_index:end_index])
+  }
+  
+  return(fragments_per_cell)
+}
+
+# Calculate fragments for the whole chromosome per cell size
+whole_chromosome_frags <- calculateFragmentsPerCell(frag_vec_full, cell_size)
+
+```
+
+
+**Section A**
+
+As we learned in class, under the assumption that:
+
+a) The distribution of reads is uniform across locations
+b) There is independence between the reads
+
+we expect the coverage to be distributed as:
+
+$$
+Z \sim \text{Poisson}(\lambda = \mu \times B)
+$$
+
+When:
+
+- $\mu$ is the coverage for a base
+- $B$ is the size of the cell
+
+
+Here, we build the infrastructure for that and also for our data.
+It is important to mention that we excluded about 10% outliers in a matching way, so we can compare apples to apples.
+
+We also wanted to measure the center and dispersion in a robust way, so we used the IQR method and took the median as well.
+
+The results will be displayed on the plots, and we will discuss their meaning below the histograms.
+
+
+```{r, warning=FALSE}
+# Filter extreme cells 
+lower_bound <- 150
+upper_bound <- 1000
+
+filtered_cells <- whole_chromosome_frags[whole_chromosome_frags >= lower_bound & whole_chromosome_frags <= upper_bound]
+
+# Calculate IQR and median for observed data
+IQR_observed <- IQR(filtered_cells)
+median_observed <- median(filtered_cells)
+
+# Expected Poisson distribution parameters
+average_coverage_full <- sum(filtered_cells) / length(filtered_cells)
+
+# Generate the expected Poisson distribution
+coverage_values <- 0:max(filtered_cells)
+poisson_probs <- dpois(coverage_values, lambda = average_coverage_full)
+
+# Calculate IQR and median for expected data
+expected_counts <- qpois(c(0.25, 0.5, 0.75), lambda = average_coverage_full)
+IQR_expected <- expected_counts[3] - expected_counts[1]
+median_expected <- expected_counts[2]
+```
+
+
+**Section B**
+
+
+```{r, warning=FALSE}
+# Compare observed and expected distributions using histograms
+observed_hist <- ggplot(data.frame(Coverage = filtered_cells), aes(x = Coverage)) +
+  geom_histogram(aes(y = ..density..), binwidth = 1, fill = "steelblue", alpha = 0.7, boundary = -0.5) +
+  geom_density(color = "coral", size = 1) +
+  ggtitle("Observed Distribution") +
+  xlab("Number of Reads per Cell") +
+  ylab("Density") +
+  theme_minimal() +
+  annotate("text", x = Inf, y = Inf, label = paste("Median:", round(median_observed, 2), "\nIQR:", round(IQR_observed, 2)), hjust = 1.1, vjust = 2, size = 4, color = "black")
+
+expected_hist <- ggplot(data.frame(Coverage = coverage_values, Density = poisson_probs), aes(x = Coverage, y = Density)) +
+  geom_bar(stat = "identity", fill = "purple", alpha = 0.7) +
+  ggtitle("Expected Poisson Distribution") +
+  xlab("Number of Reads per Cell") +
+  ylab("Density") +
+  theme_minimal() +
+  annotate("text", x = Inf, y = Inf, label = paste("Median:", round(median_expected, 2), "\nIQR:", round(IQR_expected, 2)), hjust = 1.1, vjust = 2, size = 4, color = "black")
+
+# Combine the plots for comparison
+grid.arrange(observed_hist, expected_hist, ncol = 2)
+
+```
+
+
+***Results Explanations:***
+
+We can see that if you focus on the center of the distributions, they do have some similarity, which is what we expected.
+However, when it comes to dispersion, our data shows significantly more variation. 
+This is evident in the plot and also in the differences in the IQR.
+
+**Section C**
+
+After reading a bit online, we found the Coefficient of Variation test and then thought to implement it as a ratio - by how much the Coefficient of Variation of our data is bigger than the uniform Poisson one.
+
+```{r}
+# Calculate Coefficient of Variation (CV)
+cv_observed <- sd(filtered_cells) / mean(filtered_cells)
+cv_expected <- sqrt(average_coverage_full) / average_coverage_full
+
+# Calculate the ratio of CVs
+cv_ratio <- cv_observed / cv_expected
+
+# Print the CV ratio with explanation
+cat("Coefficient of Variation (CV) Ratio:\n")
+cat("CV of Observed Data: ", round(cv_observed, 4), "\n")
+cat("CV of Expected Poisson Distribution: ", round(cv_expected, 4), "\n")
+cat("CV Ratio (Observed / Expected): ", round(cv_ratio, 4), "\n")
+
+# Interpretation
+if (cv_ratio > 1) {
+  cat("\nInterpretation:\n")
+  cat("The observed data has", round(cv_ratio, 2), "times more variability than what would be expected under a Poisson distribution.\n")
+} else if (cv_ratio < 1) {
+  cat("\nInterpretation:\n")
+  cat("The observed data has", round(1/cv_ratio, 2), "times less variability than what would be expected under a Poisson distribution.\n")
+} else {
+  cat("\nInterpretation:\n")
+  cat("The observed data has the same variability as what would be expected under a Poisson distribution.\n")
+}
+
+```
+
+
+## Part B - GC comparison for coverage (number of reads) in the cell
+
+So, the "end game" of this part is to see if there is a connection between the number of GC bases in a cell, or more precisely, the percentage of GC bases, and the number of reads in the cell.
+
+We will need to do this in steps:
+
+**Count of C+G per cell**
+
+First, we need to compute the number of GC bases in a cell.
+To do this, we will use the general idea of the function from Lab 1, Part B, and modify it to fit our case.
+We will also use the 50 million base segment between 50 million and 100 million bases, and define a cell size of 20,000 bases. This will give us 2,500 cells.
+
+
+```{r}
+# Define the 50M range and cell size
+start_base <- 50000000
+end_base <- 100000000-1
+cell_size <- 20000
+
+# Convert the factor to a character vector
+chr1_line_char <- as.character(chr1_line)
+
+# Extract the specified range from the genome sequence
+genome_range <- paste(chr1_line_char[start_base:end_base], collapse = "")
+
+# Define the function to sum C+G bases in cells
+sum_cg_bases_in_cells <- function(genome, cell_size) {
+  genome_length <- nchar(genome)
+  
+  # Initialize vector to store CG counts per cell
+  num_cells <- ceiling(genome_length / cell_size)
+  cg_counts_per_cell <- numeric(num_cells)
+  
+  # optimize the counting process
+  genome_raw <- charToRaw(genome)
+  
+  # calculate the values for 'C' and 'G'
+  raw_C <- charToRaw("C")
+  raw_G <- charToRaw("G")
+  
+  # Iterate over the genome by cell_size
+  for (i in seq_len(num_cells)) {
+    start <- (i - 1) * cell_size + 1
+    end <- min(i * cell_size, genome_length)
+    
+    # Extract the cell 
+    cell <- genome_raw[start:end]
+    
+    # Count C and G bases in the cell
+    c_count <- sum(cell == raw_C)
+    g_count <- sum(cell == raw_G)
+    
+    # Store the sum of C and G counts in the vector
+    cg_counts_per_cell[i] <- c_count + g_count
+  }
+  
+  return(cg_counts_per_cell)
+}
+
+# Vector of C+G counts in each cell for the 50M range
+cg_counts <- sum_cg_bases_in_cells(genome_range, cell_size)
+
+```
+
+
+**Count of Reads per cell**
+
+
+Now, we would like to count the number of reads per cell.
+This is a modified version of another function we already created in Lab 2, Part C.
+We will also use the function from Lab 2, Part A to create the 50 million base vector of read counts per base, and then use it as input for the modified function from Lab 2, Part C.
+
+
+```{r}
+# Using the function from Lab 2 Part A
+frag_vec_50M <- getReadLine(chr1_reads$Loc, start_base, end_base)
+
+# Using the function from Lab 2 Part C
+calculateFragmentsPerCell <- function(fragment_vector, cell_size) {
+  # Number of cells to cover the whole region
+  num_cells <- ceiling(length(fragment_vector) / cell_size)
+  
+  # Initialize vector to store fragment counts per cell
+  fragments_per_cell <- integer(num_cells)
+  
+  # Sum fragments for each cell
+  for (i in 1:num_cells) {
+    start_index <- (i - 1) * cell_size + 1
+    end_index <- min(i * cell_size, length(fragment_vector))
+    fragments_per_cell[i] <- sum(fragment_vector[start_index:end_index])
+  }
+  
+  return(fragments_per_cell)
+}
+
+# Vector for the count of reads per cell
+chromosome_frags_50M <- calculateFragmentsPerCell(frag_vec_50M, cell_size)
+```
+
+
+**Correlation between GC Count and Coverage**
+
+We have obtained what we wanted: the GC count and the coverage.
+All that is left is to calculate the correlation.
+
+```{r}
+# Calculate the correlation between CG counts and read coverage
+correlation <- cor(cg_counts, chromosome_frags_50M, method = "pearson")
+rounded_correlation <- round(correlation, 3)
+print(paste("The Correlation between CG counts & read coverage is:", rounded_correlation))
+```
+
+**Plotting GC Count Against Number of Reads & Trend line**
+
+
+Also, as requested, we plotted a scatter plot to observe the connection and added a trend line.
+
+
+```{r,warning=FALSE}
+# Calculate GC percentages
+total_bases_per_cell <- cell_size
+cg_percentages <- (cg_counts / total_bases_per_cell) * 100
+
+# Create a data frame for plotting
+plot_data <- data.frame(CG_Percentages = cg_percentages, Coverage = chromosome_frags_50M)
+
+# Plot GC percentages against the number of reads with a trend line
+ggplot(plot_data, aes(x = CG_Percentages, y = Coverage)) +
+  geom_point(size = 1, color = "steelblue", alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "coral", linetype = "dashed", size = 0.7) +
+  labs(title = "GC Percentage vs. Number of Reads",
+       x = "GC Bases per Cell (%)",
+       y = "Number of Reads per Cell") +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    panel.grid.major = element_line(color = "grey", size = 0.5),
+    panel.grid.minor = element_line(color = "lightgrey", size = 0.25)
+  )
+```
+
+***Results Explanations:***
+
+We see a high positive correlation.
+As the percentage of GC bases increases, the number of reads also increases by 2 or 3 times, almost completely linear relationship.
+
+This is problematic because it means that we have a variable that interferes with our ability to detect the signal we are looking for.
+
+In comparison to the plot in the Dohm article, both plots exhibit a positive correlation between GC content and the number of reads per cell, with trend lines reinforcing this linear relationship. 
+
+However, Dohm's plot ranges from 5,000 to 35,000 reads per cell with a GC content of 20% to 45%, while our plot ranges from 0 to 3,000 reads per cell with a GC content of 0% to 50% (possibly due to different cell sizes).
+Our plot has noticeable outliers with very high and low reads, unlike Dohm's plot, which shows a more narrow range of values.
+
+
+
+**Connection between Part A to Part B**
+
+We are not quite sure what the connection between Part A and Part B could be, but we think that the comparison with the Poisson model in Part A helps highlight the areas where the coverage significantly deviates from the expected uniform distribution.
+Part B then helps to understand one of the potential reasons for this deviation, which is the GC content
+
+
+## Short summary
+
+The main thing we learn is how problemtic can be the positive corrlation between CG count & coverage.
+
+If we imagine a situation where there is a region of the chromosome with twice as many GC bases, this would also mean that it has twice as many reads.
+Does this imply that we have an error in the number of copies?
+Does this indicate that the region is cancerous? 
+
+According to the claim here - no! 
+However, at first glance at the data without this test, we might initially expect a different result.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
