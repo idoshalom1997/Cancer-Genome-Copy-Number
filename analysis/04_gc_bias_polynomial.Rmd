@@ -1,0 +1,297 @@
+---
+title: "Modelling the GC-content bias with polynomial regression"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 18 June, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+```
+
+### Paths and Data
+
+
+```{r paths}
+
+# Load the data 
+load(file = 'data/reads_gc_5K.rda')
+
+```
+
+## Introduction
+
+In this week's task, we aim to further investigate the relationship between GC content and coverage (number of reads), using segmental polynomial regression and residual analysis to understand the correlation between them.
+
+### Part A : Segmental polynomial regression
+
+we have created a logical index to filter our data based on specific conditions:
+
+read coverage less than or equal to 500, and GC content between 0.25 and 0.65.
+
+Using this index, we filtered the GC content and read coverage data to include only the values that meet these criteria.
+
+Finally, we plotted the filtered data, showing the relationship between GC content and read coverage.
+
+```{r}
+if(any(GC_5K>1)){ # This makes sure we don't repeat the command
+  GC_5K = GC_5K / 5000
+}
+
+# Create a logical index for outliers
+filtered_index <- (reads_5K <= 500) & (GC_5K >= 0.25) & (GC_5K <= 0.65)
+
+# Apply the index to filter the data
+GC_5K_filtered <- GC_5K[filtered_index]
+reads_5K_filtered <- reads_5K[filtered_index]
+
+# Plot the data
+plot(GC_5K_filtered, reads_5K_filtered, col=rgb(0,0,0,0.2), ylim = c(0,500), cex = 0.5, xlab = "GC Content", ylab = "Read Coverage", main = "GC Content vs Read Coverage")
+```
+
+
+**Results Explanations:**
+
+The plot looks similar to what we saw in class.
+
+As GC content goes up from 0.25 to about 0.5, the read coverage also goes up, showing a positive correlation between them. However, when GC content goes above 0.5, the read coverage levels off and slightly drops.
+
+This matches what we discussed in class, where we found that a linear trend is not quite a good representation of the connection between GC content and coverage, so we might want to find the functional connection through segmental polynomial regression - which we did below:
+
+
+```{r, warning=FALSE}
+
+# Define the knots
+knots <- seq(0.25, 0.65, by = 0.1)
+
+# Calculate the averages for each knot
+knot_averages <- sapply(1:(length(knots) - 1), function(i) {
+  mean(reads_5K_filtered[GC_5K_filtered >= knots[i] & GC_5K_filtered < knots[i + 1]], na.rm = TRUE)
+})
+
+# Create a data frame for the averages
+average_data <- data.frame(
+  GC_content_start = knots[-length(knots)],
+  GC_content_end = knots[-1],
+  avg_read_coverage = knot_averages
+)
+
+# Plot data points and average in each knot as horizontal lines
+ggplot() +
+  geom_point(aes(x = GC_5K_filtered, y = reads_5K_filtered), alpha = 0.2, size = 0.5) +
+  geom_segment(data = average_data, aes(x = GC_content_start, xend = GC_content_end, 
+                                        y = avg_read_coverage, yend = avg_read_coverage), 
+               color = "blue", size = 0.634) +
+  geom_vline(xintercept = c(0.35, 0.45, 0.55), linetype = "dashed", color = "deeppink") +
+  labs(title = "Knots & Average Read Coverage", 
+       x = "GC Content", 
+       y = "Read Coverage") +
+  xlim(0.25, 0.65) +
+  ylim(0, 500)
+
+```
+
+
+**Results Explanations:**
+
+So, this plot is the preparation for the segmental polynomial regression, where we define specific knots as vertical dashed lines at 0.35, 0.45, and 0.55.
+
+For each segment defined by the knots, we calculate the average read coverage to better observe changes in trends.
+
+We can already see why the linear regression did not work - the average read coverage decreases in the 0.55-0.65 GC content interval.
+
+
+```{r}
+# Fit a polynomial regression model of degree 3 
+average_midpoints <- (average_data$GC_content_start + average_data$GC_content_end) / 2
+poly_model <- lm(avg_read_coverage ~ poly(average_midpoints, 3), data = average_data)
+
+# Generate predictions for the polynomial model
+predicted_gc <- seq(0.25, 0.65, length.out = 100)
+predicted_reads <- predict(poly_model, newdata = data.frame(average_midpoints = predicted_gc))
+
+# smooth polynomial line that fits the data
+ggplot() +
+  geom_point(aes(x = GC_5K_filtered, y = reads_5K_filtered), alpha = 0.2, size = 0.5) +
+  geom_line(aes(x = predicted_gc, y = predicted_reads), color = "red") +
+  labs(title = " GC Content vs Read Coverage with Polynomial Fit", 
+       x = "GC Content", 
+       y = "Read Coverage") +
+  xlim(0.25, 0.65) +
+  ylim(0, 500)
+```
+
+
+**Results Explanations:**
+
+At first glance, it seems like the polynomial fit captures the trend in the data more accurately than a linear model, showing the initial increase in read coverage with GC content, a peak, and then a decrease as GC content goes beyond 0.5.
+
+This visualization does confirm the nonlinear relationship between GC content and read coverage, but we might want some numerical evidence for that, which we will address in part C. 
+
+
+
+### Part 2 : Analysis of residuals against GC content
+
+Now, We want to analyze the residuals from the polynomial regression model to determine if there was any bias for certain GC content values. 
+
+We plotted these residuals against the GC content to visually inspect for any patterns. 
+
+The plot will show us whether the residuals were randomly scattered around zero, indicating no bias, or if there was a systematic bias for specific GC ranges.
+
+
+```{r}
+# Generate predictions for polynomial model
+predicted_reads_filtered <- predict(poly_model, newdata = data.frame(average_midpoints = GC_5K_filtered))
+
+# Calculate the residuals
+residuals <- reads_5K_filtered - predicted_reads_filtered
+
+# Plot the residuals against the GC content
+plot(GC_5K_filtered, residuals, xlab = "GC Content", ylab = "Residuals", main = "Residuals vs GC Content", col=rgb(0,0,0,0.2), cex = 0.5)
+abline(h = 0, col = "red", lwd = 2)  # Add a horizontal line at y = 0 for reference
+
+```
+
+**Results Explanations:**
+
+First, the horizontal line shows the situation where the coverage is zero. When we make a residual for a forecast that is increasing, the residual becomes smaller and smaller.
+
+There still appears to be some bias for certain GC values, but the polynomial model is significantly better in this regard.
+
+There is a small but noticeable pattern where the residuals are more dispersed at higher GC content values, indicating that the model's predictions are less accurate in these regions.
+
+This suggests that while the polynomial model improves the fit compared to a linear model, it does not completely eliminate biases for certain GC content values.
+
+
+### Part 3 : Numerical measure of the quality of the prediction
+
+We evaluated the quality of the polynomial regression model's predictions by comparing it to a simpler linear regression model.
+
+We fit a linear model to the same filtered data and calculated the residual sum of squares (RSS) for both models.
+
+By comparing the RSS values, we determined the improvement factor of the polynomial model over the linear model.
+
+This factor indicates how many times better the polynomial model fits the data compared to the linear model.
+
+We also calculated the R-squared for each model for reference.
+
+```{r}
+# Fit a linear regression model to the filtered data
+linear_model <- lm(reads_5K_filtered ~ GC_5K_filtered)
+
+# Generate predictions for the linear model
+predicted_reads_linear <- predict(linear_model)
+
+# Calculate the RSS for the polynomial model
+rss_poly <- sum((reads_5K_filtered - predicted_reads_filtered)^2)
+
+# Calculate the RSS for the linear model
+rss_linear <- sum((reads_5K_filtered - predicted_reads_linear)^2)
+
+# Calculate R-squared for both models
+ss_total <- sum((reads_5K_filtered - mean(reads_5K_filtered))^2)
+r_squared_poly <- 1 - rss_poly / ss_total
+r_squared_linear <- 1 - rss_linear / ss_total
+
+# Calculate the improvement factor
+improvement_factor <- rss_linear / rss_poly
+
+# Print the results
+cat("R-squared for the polynomial model:", r_squared_poly, "\n")
+cat("R-squared for the linear model:", r_squared_linear, "\n")
+cat("Improvement factor (linear RSS / polynomial RSS):", improvement_factor, "\n")
+
+```
+**Results Explanations:**
+
+The R-squared for the polynomial model is 0.6394822, indicating that approximately 63.95% of the variability in read coverage can be explained by the polynomial regression. In contrast, the R-squared for the linear model is 0.57839, meaning it explains about 57.84% of the variability.
+
+Additionally, the improvement factor is 1.169457, which indicates that the polynomial model fits the filtered data approximately 1.17 times better than the linear model.
+
+
+### Part 4 :Magnitude of the residuals between different CG values
+
+We want to examine the differences in residual magnitude across various GC content values.
+
+We plotted the residuals against GC content, with a smooth trend line added to visualize the trend.
+
+Furthermore, we conducted a small numerical analysis by calculating summary statistics for residuals within each GC content bin, as defined by the knots.
+ 
+
+```{r,message=FALSE}
+# Ensure no missing values
+residuals_df <- data.frame(GC_content = GC_5K_filtered, Residuals = residuals)
+residuals_df <- na.omit(residuals_df)
+
+# Plot residuals against GC content 
+suppressMessages({
+  ggplot(residuals_df, aes(x = GC_content, y = Residuals)) +
+    geom_point(alpha = 0.2) +
+    geom_smooth(formula = y ~ x,method = "loess", color = "blue", se = FALSE, show.legend = FALSE) +
+    geom_vline(xintercept = 0.35, linetype = "dashed", color = "deeppink") +
+    geom_vline(xintercept = 0.45, linetype = "dashed", color = "deeppink") +
+    geom_vline(xintercept = 0.55, linetype = "dashed", color = "deeppink") +
+    labs(title = "Residuals vs GC Content",
+         x = "GC Content",
+         y = "Residuals") +
+    theme_minimal()
+})
+
+# Bin the GC content
+bins <- cut(GC_5K_filtered, breaks = seq(0.25, 0.65, by = 0.1), include.lowest = TRUE)
+
+# Statistics for residuals within each bin
+summary_stats <- tapply(residuals, bins, function(x) {
+  c(mean = mean(x), sd = sd(x))
+})
+
+# Summary data frame 
+summary_df <- as.data.frame(do.call(rbind, summary_stats))
+print(summary_df)
+
+```
+
+
+
+**Results Explanations:**
+
+The plot shows slight variations across the GC content ranges, but if we dive into the statistics, it seems like the closer we get to the extreme values of GC content, the more the residuals tend to diverge from the expected zero average residuals.
+
+This may indicate a bias in extreme values of GC content in terms of the number of reads per cell.
+
+
+## Short summary
+
+We think that overall, the polynomial regression model provided a more accurate representation of the data, but we are not quite sure that even this method is the best way to capture the connection between GC content and coverage. 
+
+Further limitations and adjustments to the degree of the polynomial may be needed.
+
+
+
