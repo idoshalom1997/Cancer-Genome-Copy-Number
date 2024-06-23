@@ -1,0 +1,616 @@
+---
+title: "Spline regression and train/test strategies for the GC bias"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 25 June, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+library(splines)
+library(knitr)
+```
+
+### Paths and Data
+
+
+```{r paths}
+
+# Load the data for GC count
+load(file = 'data/chr1_str_30M_50M.rda')
+
+# Load the data for reads per cell
+reads_file = 'data/raw/TCGA-13-0723-01A_lib1_all_chr1.forward'
+```
+
+```{r}
+# Split letters 
+my_data = strsplit(chr1_str_30M_50M, '')[[1]][-1]
+
+# Count bases in total
+table(my_data)
+```
+
+```{r}
+# Load chromosome 1 reads
+chr1_reads = fread(reads_file) 
+
+# Adding relevant columns names
+colnames(chr1_reads) = c("Chrom","Loc","FragLen")   
+
+# Display summary
+summary(chr1_reads)
+```
+
+
+## Introduction
+
+In this week's task, we will try to fit spline regressions for the CG content vs. reads coverage and also examine the effects of different division strategies into train and test areas.
+
+
+## Setup 
+
+In preparation for this week's task, we will first need to generate several items from our data:
+
+- A function that counts the number of C+G bases per 5k cell.
+- A function that calculates the number of reads per 5k cell.
+- A filtered scatter plot of CG Content vs. Reads Coverage.
+
+**Notes:** 
+
+- We chose a 5k cell size after trying different sizes, and this size best captures the decline in reads after the 0.6 CG content mark.
+- We fitted the length and location of our segment from chromosome 1 for Lab 1 (30M - 50M) to be the exact part used in the reads file.
+
+
+***The CG Count per cell function:***
+
+```{r}
+# Define the function to count C+G bases per cell
+sum_CG_bases_in_cells <- function(genome, cell_size) {
+  genome_length <- nchar(genome)
+  
+  # Initialize a vector to store the CG counts per cell
+  CG_counts_per_cell <- numeric(ceiling(genome_length / cell_size))
+  
+  # Iterate over the genome by cell_size
+  for (i in seq(1, genome_length, by = cell_size)) {
+    end <- min(i + cell_size - 1, genome_length)
+    cell <- substring(genome, i, end)
+    
+    # Count C and G bases in the cell
+    CG_count <- sum(charToRaw(cell) == charToRaw("C")) + sum(charToRaw(cell) == charToRaw("G"))
+    
+    # Store the CG count in the vector
+    CG_counts_per_cell[(i - 1) %/% cell_size + 1] <- CG_count
+  }
+  
+  return(CG_counts_per_cell)
+}
+
+
+# Calculate CG counts per cell of size 5,000
+CG_counts_5k <- sum_CG_bases_in_cells(chr1_str_30M_50M, 5000)
+
+
+```
+
+
+***The reads per cell function:***
+
+
+```{r}
+# Define the start and end base positions 
+start_base <- 30000000
+end_base <- 50000000
+cell_size <- 5000
+
+# Filter reads to the range of interest
+reads_filtered <- chr1_reads[Loc >= start_base & Loc <= end_base]
+
+# Function to calculate the number of reads per cell
+calculateReadsPerCell <- function(reads, cell_size, start_base, end_base) {
+  num_cells <- ceiling((end_base - start_base + 1) / cell_size)
+  reads_per_cell <- integer(num_cells)
+  
+  for (i in seq_len(num_cells)) {
+    cell_start <- start_base + (i - 1) * cell_size
+    cell_end <- min(cell_start + cell_size - 1, end_base)
+    reads_per_cell[i] <- sum(reads$Loc >= cell_start & reads$Loc <= cell_end)
+  }
+  
+  return(reads_per_cell)
+}
+
+# Calculate the coverage per cell
+reads_cell_5k <- calculateReadsPerCell(reads_filtered, cell_size, start_base, end_base)
+
+```
+
+
+***Plot of CG content vs read coverage with relevant filters:***
+
+
+```{r}
+# Normalize CG counts if necessary
+if (any(CG_counts_5k > 1)) {
+  CG_counts_5k <- CG_counts_5k / 5000
+}
+
+
+# Filter the data
+filtered_index <- (reads_cell_5k <= 500) & (CG_counts_5k >= 0.29) & (CG_counts_5k<= 0.64)
+GC_content_filtered <- CG_counts_5k[filtered_index]
+reads_filtered <- reads_cell_5k[filtered_index]
+
+# Plot the data with explicit x-axis limits
+plot(GC_content_filtered, reads_filtered, col = rgb(0, 0, 0, 0.4), ylim = c(0, 500), cex = 0.5,
+     xlab = "GC Content", ylab = "Read Coverage", main = "GC Content vs Read Coverage")
+```
+
+
+
+## Part A: Data Splitting Strategies
+
+### Random 20 Equal Parts:
+
+```{r}
+# Define the knots
+knots <- c(0.36, 0.43, 0.50, 0.57)
+
+set.seed(127)  # For reproducibility
+num_parts <- 20
+part_length <- length(GC_content_filtered) %/% num_parts
+
+# Generate indices for the parts
+part_indices <- sample(rep(1:num_parts, each = part_length, length.out = length(GC_content_filtered)))
+
+# Randomly assign 14 parts to the train set
+train_parts <- sample(num_parts, 14)
+train_index_1 <- part_indices %in% train_parts
+test_index_1 <- !train_index_1
+
+# Train and test sets
+train_set_1 <- data.frame(GC_content = GC_content_filtered[train_index_1], Reads = reads_filtered[train_index_1])
+test_set_1 <- data.frame(GC_content = GC_content_filtered[test_index_1], Reads = reads_filtered[test_index_1])
+
+```
+
+
+```{r, warning=FALSE}
+# Fit the linear spline regression model to the training data
+linear_spline_model_1 <- lm(Reads ~ bs(GC_content, knots = knots, degree = 1), data = train_set_1)
+
+# Fit the cubic spline regression model to the training data
+cubic_spline_model_1 <- lm(Reads ~ bs(GC_content, knots = knots), data = train_set_1)
+
+# Predict on training data for both models
+linear_train_predictions_1 <- predict(linear_spline_model_1, newdata = train_set_1)
+cubic_train_predictions_1 <- predict(cubic_spline_model_1, newdata = train_set_1)
+
+# Predict on test data for both models
+linear_test_predictions_1 <- predict(linear_spline_model_1, newdata = test_set_1)
+cubic_test_predictions_1 <- predict(cubic_spline_model_1, newdata = test_set_1)
+
+# Create the training plot
+train_plot_1 <- ggplot(train_set_1, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_line(aes(y = linear_train_predictions_1), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_train_predictions_1), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Training Data (Equal Parts)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Create the test plot
+test_plot_1 <- ggplot(test_set_1, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_line(aes(y = linear_test_predictions_1), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_test_predictions_1), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Test Data (Equal Parts)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_plot_1, test_plot_1, ncol = 2)
+```
+
+
+
+```{r}
+# Calculate R-squared for linear spline on training data
+linear_train_r2_1 <- summary(linear_spline_model_1)$r.squared
+
+# Calculate R-squared for cubic spline on training data
+cubic_train_r2_1 <- summary(cubic_spline_model_1)$r.squared
+
+# Calculate R-squared for linear spline on test data
+linear_test_r2_1 <- 1 - sum((test_set_1$Reads - linear_test_predictions_1)^2) / sum((test_set_1$Reads - mean(test_set_1$Reads))^2)
+
+# Calculate R-squared for cubic spline on test data
+cubic_test_r2_1 <- 1 - sum((test_set_1$Reads - cubic_test_predictions_1)^2) / sum((test_set_1$Reads - mean(test_set_1$Reads))^2)
+
+# Fit simple linear regression model to the training data for equal parts (_1)
+linear_model_1 <- lm(Reads ~ GC_content, data = train_set_1)
+linear_train_predictions_1 <- predict(linear_model_1, newdata = train_set_1)
+linear_test_predictions_1 <- predict(linear_model_1, newdata = test_set_1)
+
+# Calculate R-squared for simple linear regression on training data
+linear_train_r2_simple_1 <- summary(linear_model_1)$r.squared
+
+# Calculate R-squared for simple linear regression on test data
+linear_test_r2_simple_1 <- 1 - sum((test_set_1$Reads - linear_test_predictions_1)^2) / sum((test_set_1$Reads - mean(test_set_1$Reads))^2)
+```
+
+### Completely Random Split:
+
+```{r}
+# Set seed for reproducibility
+set.seed(245)
+
+# Randomly sample 70% of the cells for training and 30% for testing
+random_sample_2 <- sample(length(GC_content_filtered), size = 0.7 * length(GC_content_filtered))
+
+train_index_2 <- rep(FALSE, length(GC_content_filtered))
+train_index_2[random_sample_2] <- TRUE
+test_index_2 <- !train_index_2
+
+# Train and test sets
+train_set_2 <- data.frame(GC_content = GC_content_filtered[train_index_2], Reads = reads_filtered[train_index_2])
+test_set_2 <- data.frame(GC_content = GC_content_filtered[test_index_2], Reads = reads_filtered[test_index_2])
+```
+
+```{r}
+# Fit the linear spline regression model to the training data
+linear_spline_model_2 <- lm(Reads ~ bs(GC_content, knots = knots, degree = 1), data = train_set_2)
+
+# Fit the cubic spline regression model to the training data
+cubic_spline_model_2 <- lm(Reads ~ bs(GC_content, knots = knots), data = train_set_2)
+
+# Predict on training data for both models
+linear_train_predictions_2 <- predict(linear_spline_model_2, newdata = train_set_2)
+cubic_train_predictions_2 <- predict(cubic_spline_model_2, newdata = train_set_2)
+
+# Predict on test data for both models
+linear_test_predictions_2 <- predict(linear_spline_model_2, newdata = test_set_2)
+cubic_test_predictions_2 <- predict(cubic_spline_model_2, newdata = test_set_2)
+
+# Create the training plot
+train_plot_2 <- ggplot(train_set_2, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_line(aes(y = linear_train_predictions_2), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_train_predictions_2), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Training Data (Random Split)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Create the test plot
+test_plot_2 <- ggplot(test_set_2, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_line(aes(y = linear_test_predictions_2), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_test_predictions_2), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Test Data (Random Split)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_plot_2, test_plot_2, ncol = 2)
+
+```
+
+
+```{r}
+# Calculate R-squared for linear spline on training data
+linear_train_r2_2 <- summary(linear_spline_model_2)$r.squared
+
+# Calculate R-squared for cubic spline on training data
+cubic_train_r2_2 <- summary(cubic_spline_model_2)$r.squared
+
+# Calculate R-squared for linear spline on test data
+linear_test_r2_2 <- 1 - sum((test_set_2$Reads - linear_test_predictions_2)^2) / sum((test_set_2$Reads - mean(test_set_2$Reads))^2)
+
+# Calculate R-squared for cubic spline on test data
+cubic_test_r2_2 <- 1 - sum((test_set_2$Reads - cubic_test_predictions_2)^2) / sum((test_set_2$Reads - mean(test_set_2$Reads))^2)
+
+# Fit simple linear regression model to the training data for random split (_2)
+linear_model_2 <- lm(Reads ~ GC_content, data = train_set_2)
+linear_train_predictions_2 <- predict(linear_model_2, newdata = train_set_2)
+linear_test_predictions_2 <- predict(linear_model_2, newdata = test_set_2)
+
+# Calculate R-squared for simple linear regression on training data
+linear_train_r2_simple_2 <- summary(linear_model_2)$r.squared
+
+# Calculate R-squared for simple linear regression on test data
+linear_test_r2_simple_2 <- 1 - sum((test_set_2$Reads - linear_test_predictions_2)^2) / sum((test_set_2$Reads - mean(test_set_2$Reads))^2)
+```
+
+
+
+### Ordered Split:
+
+
+```{r,warning=FALSE}
+# Set seed for reproducibility
+set.seed(345)
+
+# Completely ordered distribution
+train_index_3 <- 1:floor(0.7 * length(GC_content_filtered))
+test_index_3 <- (floor(0.7 * length(GC_content_filtered)) + 1):length(GC_content_filtered)
+
+# Train and test sets
+train_set_3 <- data.frame(GC_content = GC_content_filtered[train_index_3], Reads = reads_filtered[train_index_3])
+test_set_3 <- data.frame(GC_content = GC_content_filtered[test_index_3], Reads = reads_filtered[test_index_3])
+
+```
+
+```{r,warning=FALSE}
+# Fit the linear spline regression model to the training data
+linear_spline_model_3 <- lm(Reads ~ bs(GC_content, knots = knots, degree = 1), data = train_set_3)
+
+# Fit the cubic spline regression model to the training data
+cubic_spline_model_3 <- lm(Reads ~ bs(GC_content, knots = knots), data = train_set_3)
+
+# Predict on training data for both models
+linear_train_predictions_3 <- predict(linear_spline_model_3, newdata = train_set_3)
+cubic_train_predictions_3 <- predict(cubic_spline_model_3, newdata = train_set_3)
+
+# Predict on test data for both models
+linear_test_predictions_3 <- predict(linear_spline_model_3, newdata = test_set_3)
+cubic_test_predictions_3 <- predict(cubic_spline_model_3, newdata = test_set_3)
+
+# Create the training plot
+train_plot_3 <- ggplot(train_set_3, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_line(aes(y = linear_train_predictions_3), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_train_predictions_3), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Training Data (Oreder Split)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Create the test plot
+test_plot_3 <- ggplot(test_set_3, aes(x = GC_content, y = Reads)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_line(aes(y = linear_test_predictions_3), color = "red", linetype = "dashed") +
+  geom_line(aes(y = cubic_test_predictions_3), color = "yellow") +
+  geom_vline(xintercept = knots, linetype = "dashed", color = "black", size = 0.4) +
+  labs(title = "Test Data (Oreder Split)",
+       x = "GC Content", y = "Read Coverage") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_plot_3, test_plot_3, ncol = 2)
+```
+
+
+```{r}
+# Calculate R-squared for linear spline on training data
+linear_train_r2_3 <- summary(linear_spline_model_3)$r.squared
+
+# Calculate R-squared for cubic spline on training data
+cubic_train_r2_3 <- summary(cubic_spline_model_3)$r.squared
+
+# Calculate R-squared for linear spline on test data
+linear_test_r2_3 <- 1 - sum((test_set_3$Reads - linear_test_predictions_3)^2) / sum((test_set_3$Reads - mean(test_set_3$Reads))^2)
+
+# Calculate R-squared for cubic spline on test data
+cubic_test_r2_3 <- 1 - sum((test_set_3$Reads - cubic_test_predictions_3)^2) / sum((test_set_3$Reads - mean(test_set_3$Reads))^2)
+
+# Fit simple linear regression model to the training data for ordered split (_3)
+linear_model_3 <- lm(Reads ~ GC_content, data = train_set_3)
+linear_train_predictions_3 <- predict(linear_model_3, newdata = train_set_3)
+linear_test_predictions_3 <- predict(linear_model_3, newdata = test_set_3)
+
+# Calculate R-squared for simple linear regression on training data
+linear_train_r2_simple_3 <- summary(linear_model_3)$r.squared
+
+# Calculate R-squared for simple linear regression on test data
+linear_test_r2_simple_3 <- 1 - sum((test_set_3$Reads - linear_test_predictions_3)^2) / sum((test_set_3$Reads - mean(test_set_3$Reads))^2)
+```
+
+
+**Results Explanations:**
+
+When looking at the graphs in general, it is not possible to see drastic changes between the three divisions. For all three divisions, the linear spline performs very well in matching the cubic spline
+We chose to do a Quantitative measure of \(R^2\) as a way to see the general fit of all models.
+
+
+### Quantitative measure \(R^2\) :
+
+
+```{r}
+# Create a data frame to hold all R-squared values
+r2_table <- data.frame(
+  Metric = c("Linear_Train_R2", "Linear_Test_R2", 
+             "Linear_Spline_Train_R2", "Linear_Spline_Test_R2", 
+             "Cubic_Spline_Train_R2", "Cubic_Spline_Test_R2"),
+  `Equal Part (1)` = round(c(linear_train_r2_simple_1, linear_test_r2_simple_1, 
+                             linear_train_r2_1, linear_test_r2_1, 
+                             cubic_train_r2_1, cubic_test_r2_1), 3),
+  `Random Split (2)` = round(c(linear_train_r2_simple_2, linear_test_r2_simple_2, 
+                               linear_train_r2_2, linear_test_r2_2, 
+                               cubic_train_r2_2, cubic_test_r2_2), 3),
+  `Order Split (3)` = round(c(linear_train_r2_simple_3, linear_test_r2_simple_3, 
+                        linear_train_r2_3, linear_test_r2_3, 
+                        cubic_train_r2_3, cubic_test_r2_3), 3)
+)
+
+# Print the table 
+kable(r2_table, caption = "R-squared values for different models")
+```
+
+
+## Part B: Model Performance Comparison
+
+### Training Data Performance: 
+
+- As for normal linear regression, there is almost no difference between the "Equal Part (1)" model and the "Random Split (2)" model, but both are superior to the "Order Split (3)" model.We seem to have found this a bit confusing. In the "Order Split (3)" model, we would expect a high \(R^2\) because the parts that are not supposed to be linear are located in high CG areas, so they should be associated with the test and not harm the training.We believe that the reason for the result stems from the large influence of unfiltered extreme values in specific locations that pull the regression line one way or the other. For example, there is a large grouping of cells in the third knot of cells under 50 reeds.
+
+- Regarding both the linear spline and the cubic spline, it seems that the regression is much more accurate for all three divisions, although the "Equal Part (1)" model and the "Random Split (2)" model are still better than the "Order Split (3)" model for the same reasons mentioned above.
+
+
+### Test Data Performance:
+
+- When examining the training data, the problems of the simple linear model are evident again, especially regarding the "Order Split (3)" model. A possible reason for this is the effect of a change in trends expected at high CG values, plus the sparseness of the data in this region, resulting in a smaller variance and creating a "false" \(R^2\) index spike, in a sense.
+
+- It seems that here too, the linear and cubic splines remain quite similar in terms of prediction and perform better compared to the linear test. The false effect of the \(R^2\) for the "Order Split (3)" model is still present.
+
+### Possible Reasons for Differences:
+
+As we mentioned above, the difference that really stands out is between the "Order Split (3)" model to the "Equal Part (1)" model & "Random Split (2)" model. The main reason for this is the lack of randomness in model 3, which can affect the difficulty of the model training due to the lack of data in the high GC content region, and also, the bias in the magnitude of the variance in the high GC content region causes a "false" increase \(R^2\) in the "Order Split (3)" model .
+
+## Part C: Best Generalization Model
+
+To determine which division strategy best generalizes coverage data on other chromosomes, we need to see how well each method captures the patterns in the data without overfitting.
+
+- The "Equal Part (1)" model reduces overfitting but might miss global trends if the parts aren't representative of the whole chromosome.
+
+- The "Random Split (2)" model mixing different regions and capturing overall variability. While randomness might make some regions underrepresented, this method balances the training set and reduces bias. 
+
+- The "Order Split (3)" model tends to overfit to specific trends in the beginning of the chromosome, missing patterns in the latter part.
+
+Given these points,we think that the "Random Split (2)" model is the best choice for generalization. it captures general trends effectively, as shown by the R-squared values for the test data, making it the preferred method for generalizing to other chromosomes.
+
+## Part D: Residual Analysis
+
+```{r}
+# Calculate residuals for the training data
+train_residuals_2 <- train_set_2$Reads - linear_train_predictions_2
+
+# Calculate residuals for the test data
+test_residuals_2 <- test_set_2$Reads - linear_test_predictions_2
+
+# Combine residuals and GC content for plotting
+train_set_2$residuals <- train_residuals_2
+test_set_2$residuals <- test_residuals_2
+
+train_set_2$predicted <- linear_train_predictions_2
+test_set_2$predicted <- linear_test_predictions_2
+
+train_set_2$position <- seq_along(train_set_2$GC_content)
+test_set_2$position <- seq_along(test_set_2$GC_content)
+```
+
+
+### As a Function of GC Content:
+
+```{r}
+# Plot residuals as a function of GC content for training data
+train_gc_plot <- ggplot(train_set_2, aes(x = GC_content, y = residuals)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs GC Content (Train)",
+       x = "GC Content", y = "Residuals") +
+  theme_minimal()
+
+# Plot residuals as a function of GC content for test data
+test_gc_plot <- ggplot(test_set_2, aes(x = GC_content, y = residuals)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs GC Content (Test)",
+       x = "GC Content", y = "Residuals") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_gc_plot, test_gc_plot, ncol = 2)
+```
+
+
+### As a Function of Predicted Value:
+
+```{r}
+# Plot residuals as a function of predicted values for training data
+train_pred_plot <- ggplot(train_set_2, aes(x = predicted, y = residuals)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Predicted Values (Train)",
+       x = "Predicted Values", y = "Residuals") +
+  theme_minimal()
+
+# Plot residuals as a function of predicted values for test data
+test_pred_plot <- ggplot(test_set_2, aes(x = predicted, y = residuals)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Predicted Values (Test)",
+       x = "Predicted Values", y = "Residuals") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_pred_plot, test_pred_plot, ncol = 2)
+```
+
+### As a Function of Chromosome Position:
+
+```{r}
+# Plot residuals as a function of position on the chromosome for training data
+train_pos_plot <- ggplot(train_set_2, aes(x = position, y = residuals)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Position (Train)",
+       x = "Position on Chromosome", y = "Residuals") +
+  theme_minimal()
+
+# Plot residuals as a function of position on the chromosome for test data
+test_pos_plot <- ggplot(test_set_2, aes(x = position, y = residuals)) +
+  geom_point(alpha = 0.4, color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Position (Test)",
+       x = "Position on Chromosome", y = "Residuals") +
+  theme_minimal()
+
+# Arrange the plots side by side
+grid.arrange(train_pos_plot, test_pos_plot, ncol = 2)
+```
+
+
+**Results Explanations:**
+
+- When we examine the residuals as a function of GC Content vs. residuals as a function of Predicted Value, we get practically the same plot, only on a different scale for the X-axis values. This comes from the fact that, in a simple linear regression, \(\hat{y}\) is a linear combination of \(x\).the spread of residuals is not equal across all parts of the X-axis, suggesting heteroscedasticity. This implies that the model accuracy changes for cells with different predicted read coverage, leading to more significant errors in different regions.
+
+- On the other hand, when we look at the residuals as a function of Chromosome Position, we can see a uniform spread across the location, suggesting homoscedasticity. This means that the residuals show no systematic bias related to the position on the chromosome, implying that the model errors are not dependent on location.
+
+
+### Model Trend Line Assessment:
+
+We believe that the estimated spline regression of our chosen model captures the conditional expectation line well. However, the residual plots show heteroscedasticity, which suggests that some specific regions are overly affected by outliers, causing the model to not work as well in those areas.
+
+
+### Model Improvement Suggestions:
+
+In general, we think there is a lot of ways to improve the model, including: non linear models, a better classification and removal of outliers, or even a applying regularization techniques like Ridge or Lasso regression might help in improving the model performance
+
+
+## Short summary
+
+In conclusion, we learned that simple linear regression is not the best way to capture the connection between CG content and read coverage. A completely random division of the data is probably the best way to split it in order to examine trends in our case.
+
+
+
