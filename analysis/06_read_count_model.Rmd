@@ -1,0 +1,377 @@
+---
+title: "A model of read counts and finding replicated regions"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 2 July, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+library(splines)
+library(knitr)
+```
+
+### Paths and Data
+
+
+```{r paths}
+
+# Load the data for GC count
+load(file = 'data/chr1_str_30M_50M.rda')
+
+# Load the data for reads per cell
+reads_file = 'data/raw/TCGA-13-0723-01A_lib1_all_chr1.forward'
+```
+
+```{r}
+# Split letters 
+my_data = strsplit(chr1_str_30M_50M, '')[[1]][-1]
+
+# Count bases in total
+table(my_data)
+```
+
+```{r}
+# Load chromosome 1 reads
+chr1_reads = fread(reads_file) 
+
+# Adding relevant columns names
+colnames(chr1_reads) = c("Chrom","Loc","FragLen")   
+
+# Display summary
+summary(chr1_reads)
+```
+
+## Introduction
+
+In this week's task, we will implement the model we learned in class about how reads are distributed in a specific cell. with its help, we will try to find replicates of cells, taking into consideration the positive correlation between the CG content in a cell and the number of reads per cell.
+
+
+## Setup 
+
+In preparation for this week's task, we will first need to generate several items from our data:
+
+- A function that counts the number of C+G bases per 5k cell.
+- A function that calculates the number of reads per 5k cell.
+- A function $f(gc_i)$, which is the expected value function dependent on the GC content in the cell (resulting from spline regression).
+
+**Notes:** 
+
+- We chose a 5k cell size after trying different sizes, and this size best captures the decline in reads after the 0.6 CG content mark.
+- We fitted the length and location of our segment from chromosome 1 for Lab 1 (30M - 50M) to be the exact part used in the reads file.
+- For the $f(gc_i)$ function, we will use the "Completely Random Split" model for lab 5.
+
+
+***The CG Count per cell function:***
+
+```{r}
+# Define the function to count C+G bases per cell
+sum_CG_bases_in_cells <- function(genome, cell_size) {
+  genome_length <- nchar(genome)
+  
+  # Initialize a vector to store the CG counts per cell
+  CG_counts_per_cell <- numeric(ceiling(genome_length / cell_size))
+  
+  # Iterate over the genome by cell_size
+  for (i in seq(1, genome_length, by = cell_size)) {
+    end <- min(i + cell_size - 1, genome_length)
+    cell <- substring(genome, i, end)
+    
+    # Count C and G bases in the cell
+    CG_count <- sum(charToRaw(cell) == charToRaw("C")) + sum(charToRaw(cell) == charToRaw("G"))
+    
+    # Store the CG count in the vector
+    CG_counts_per_cell[(i - 1) %/% cell_size + 1] <- CG_count
+  }
+  
+  return(CG_counts_per_cell)
+}
+
+
+# Calculate CG counts per cell of size 5,000
+CG_counts_5k <- sum_CG_bases_in_cells(chr1_str_30M_50M, 5000)
+
+```
+
+
+***The reads per cell function:***
+
+
+```{r}
+# Parameters definition 
+start_base <- 30000000
+end_base <- 50000000
+cell_size <- 5000
+
+# Filter reads to the range of interest
+reads_filtered <- chr1_reads[Loc >= start_base & Loc <= end_base]
+
+# Function to calculate the number of reads per cell
+calculateReadsPerCell <- function(reads, cell_size, start_base, end_base) {
+  num_cells <- ceiling((end_base - start_base + 1) / cell_size)
+  reads_per_cell <- integer(num_cells)
+  
+  for (i in seq_len(num_cells)) {
+    cell_start <- start_base + (i - 1) * cell_size
+    cell_end <- min(cell_start + cell_size - 1, end_base)
+    reads_per_cell[i] <- sum(reads$Loc >= cell_start & reads$Loc <= cell_end)
+  }
+  
+  return(reads_per_cell)
+}
+
+# Calculate the coverage per cell
+reads_cell_5k <- calculateReadsPerCell(reads_filtered, cell_size, start_base, end_base)
+
+```
+
+***The $f(gc_i)$ function***
+
+```{r}
+# Define the knots
+knots <- c(0.36, 0.43, 0.50, 0.57)
+
+# CG content
+if (any(CG_counts_5k > 1)) {
+  CG_counts_5k <- CG_counts_5k / 5000
+}
+
+# Filter the data
+filtered_index <- (reads_cell_5k <= 500) & (CG_counts_5k >= 0.29) & (CG_counts_5k<= 0.64)
+GC_content_filtered <- CG_counts_5k[filtered_index]
+reads_filtered <- reads_cell_5k[filtered_index]
+
+
+# Set seed 
+set.seed(245)
+
+# Using method 2 from Lab 5
+random_sample_2 <- sample(length(GC_content_filtered), size = 0.7 * length(GC_content_filtered))
+
+train_index_2 <- rep(FALSE, length(GC_content_filtered))
+train_index_2[random_sample_2] <- TRUE
+test_index_2 <- !train_index_2
+
+# Train and test sets
+train_set_2 <- data.frame(GC_content = GC_content_filtered[train_index_2], Reads = reads_filtered[train_index_2])
+
+
+# Fit the cubic spline regression model 
+f <- lm(Reads ~ bs(GC_content, knots = knots), data = train_set_2)
+
+
+```
+
+
+## Part A: Function that estimates genomic copy number
+
+
+like we learned in class, the operation of the function is that, for each observed reads cell value Y[i], it calculates an estimate a[i] for the copies number, dividing Y[i] by the predicted value f_gc[i] from the model.
+
+
+```{r}
+# Function to estimate genomic copy number
+estimate_copy_number <- function(Y, GC, f_model) {
+
+  # Calculate f(gc_i) 
+  f_gc <- predict(f,newdata = data.frame(GC_content = GC))
+  
+  # Initialize vector to store the estimates for a
+  a_estimates <- numeric(length(Y))
+  
+  # Iterate over the observed coverage values to estimate a_i
+  for (i in seq_along(Y)) {
+    a_estimates[i] <- Y[i] / f_gc[i]
+  }
+  return(a_estimates)
+}
+
+```
+
+
+
+## Part B: Opration of the function for a spcific cell segment
+
+
+### Question 1: Estimates histogram & distribution along the chromosome
+
+We took a continuous cell region that is between 1000 to 1999. This means from the 35M location on the chromosome to the 40M location. We created a histogram where each bin represents 20 cells, and the density is the multiple of the cells.
+
+For example, there are 90 cells (20 * 4.5) with an "a" value just above 1 (the first column after 1).
+
+```{r,warning=FALSE}
+# "a" estimate in the wanted range
+all_a_hat <- estimate_copy_number(reads_filtered[1000:1999], GC_content_filtered[1000:1999], f)
+
+# Convert all_a_hat to a data frame
+all_a_hat_df <- data.frame(value = all_a_hat)
+
+# Create the histogram 
+p <- ggplot(all_a_hat_df, aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "skyblue", color = "black", alpha = 0.7) +
+  stat_function(fun = dnorm, args = list(mean = mean(all_a_hat), sd = sd(all_a_hat)), 
+                color = "red", size = 0.75) +
+  labs(title = " a's Histogram with Normal Distribution Fit",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()
+
+# Display the plot
+print(p)
+
+
+```
+
+
+**Results Explanations:**
+
+The results might contradict what we expected. In theory, we would expect that after handling the CG content correlations, we would get a much higher concentration of cells around the value 1, as it represents 1 copy per cell.
+
+In reality, we obtained a somewhat close to normal distribution with a mean around 1. We believe there is a lot more noise than we would expect, indicating that factors other than just the CG content may affect the number of reads per cell.
+
+
+```{r}
+# Subset the data for the 1000 consecutive cells
+subset_reads <- reads_filtered[1000:1999]
+subset_GC <- GC_content_filtered[1000:1999]
+
+# Estimate genomic copy numbers
+genomic_copy_estimates <- estimate_copy_number(subset_reads, subset_GC, f)
+
+# location normalized
+genome_positions <- 1:1000  
+
+copy_number_data <- data.frame(Genome_Position = genome_positions, Copy_Number = genomic_copy_estimates)
+
+# distribution along the genome
+plot_genome_distribution <- ggplot(copy_number_data, aes(x = Genome_Position, y = Copy_Number)) +
+  geom_point(color = "steelblue") +  # Scatter plot of copy number estimates
+  geom_smooth(formula = y ~ x,method = "loess", se = FALSE, color = "red") +  # Smoothed line for trend
+  labs(title = "Distribution of Genomic Copy Numbers along Genome",
+       x = "Genomic Position",
+       y = "Estimated Copy Number") +
+  theme_minimal()
+
+# Print the plot
+print(plot_genome_distribution)
+```
+
+
+**Results Explanations:**
+
+One reason that we could check why we got the histogram of "a" as we did, is that there might be another effect where different locations of cells bring out significantly different values of the "a" estimate.
+
+From the plot we obtained for our specific case, we are not quite sure that this is true. We do see that we did not get a horizontal straight line at the value 1, but we don't think it is significant enough to assume that the location matters when we look at the "a" estimate value.
+
+
+### Question 2: Quantitative measure \(MAD\)
+
+As a quantitative measure, we chose the \(MAD\) - mean absolute deviation.
+
+
+What it does is take the "a" estimates we got, subtract 1 from each, and then take the absolute value (because we don't care in which direction it deviates from 1 right now, just that it is far from 1).
+
+
+
+```{r}
+# Compute absolute deviations from the target value (1)
+absolute_deviations <- abs(genomic_copy_estimates - 1)
+
+# Calculate the MAD
+mean_absolute_deviation <- mean(absolute_deviations)
+
+# Print the result
+mean_absolute_deviation
+```
+
+
+**Results Explanations:**
+
+
+We got \(MAD\) of approximately 0.0783, which indicates that, on average, the estimated genomic copy numbers deviate by this amount from the target value of 1.
+
+So, we can say that, on average, throughout the entire range of locations we checked, we would expect a value of 1.0783 copies per cell.
+
+The problem we have with the \(MAD\) is that the number we get, don't tells us much about what is its magnitude - what does it mean in terms of copies that "\(MAD\) of approximately 0.0783"?
+
+ 
+
+## Part C: Evaluation of the copy estimates
+
+Overall, we believe that the "a" values do a good job of estimating the number of copies per cell.
+
+However, we can think of reasons why it might not be the best estimator.
+
+First, there may be a dependency on the locations concerning the number of copies. We previously claimed it might not be significant in our analysis, but to be absolutely sure, we would need to check a much larger range of the chromosome.
+
+Second, we don't know the magnitude of the variance in the noise factor (V value). We assumed that it is relatively low and has little to no impact, so we ignored it when computing "a". However, this is not necessarily true, and if we encounter a large V value, it could significantly affect the accuracy of the copy number estimator "a".
+
+
+## Part D: Idea to estimate "V"
+
+We thought that because we used the method of moments to compute the "a" values, it makes sense to use the method of moments to compute the "V" value.
+
+Let's show it in a code:
+
+
+```{r}
+# Define the Method of Moments estimator for v
+method_of_moments_v <- function(Y, GC, f_model) {
+  lambda <- estimate_copy_number(Y, GC, f_model)  
+  eta <- lambda / Y  
+  v_estimate <- var(eta)  
+  return(v_estimate)
+}
+
+# Our filtered  data 
+Y <- reads_filtered[1000:1999]
+GC <- GC_content_filtered[1000:1999]
+
+# Estimate v using Method of Moments
+estimated_v <- method_of_moments_v(Y, GC, f)
+
+# Print the estimated value of v 
+sprintf("%.10f", estimated_v)
+```
+
+**Results Explanations:**
+
+The estimator being very close to 0 (e.g., 6.697984×10−7) suggests that our assumption of a low V value and a normal distribution of noise with a mean of 1 could be reasonable.
+
+If that the case then, the noise for the \(\lambda\) value, does not have much impact on it.
+
+This emphasizes that there may be another reason for the deviation from 1 in the "a" estimate, which might give us the real reason why we see different amounts of copies in some cells.
+
+
+## Short summary
+
+So it is safe to say that taking into consideration the correlations of GC content with the number of reads per cell, and only then computing an estimate for the number of copies per cell, showed pretty good results.
+
+Nevertheless, we did see some impact of location on the number of copies per cell, and we might need further investigation to see if that is really the case.
