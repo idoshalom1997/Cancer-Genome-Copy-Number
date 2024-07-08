@@ -1,0 +1,756 @@
+---
+title: "Cancer vs. healthy: detecting copy-number changes"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 9 July, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+library(splines)
+library(knitr)
+```
+
+### Paths and Data
+
+
+```{r paths}
+# Loading file path where the cancer data is stored 
+load(file = 'data/reads_100_A1.rda')
+
+# Loading file path where the health data is stored
+load(file = 'data/reads_100_B1.rda')
+
+# Load the data for GC count
+load(file = 'data/GC_100.rda')
+```
+
+## Introduction
+
+In this week's task, we will compare a cancer sample to a healthy sample in order to identify problematic areas on the genome in terms of the number of copies. 
+
+Our "end game" is to diagnose whether a specific segment of chromosome 1 is more likely to have cancer.
+
+## Setup - Preliminary part 
+
+To make the process easier, we added 0 values to each file to represent 0 reads in a cell or 0 GC count in every cell. This is only for the purpose of ensuring equal cell size along the entire 250M length of the chromosome.
+
+We will eventually clean the data and remove outliers so that the illogical parts (0 GC count in every cell) will not matter.
+
+As requested, we created 100k cells for the cancer sample and healthy sample, each cell containing 2.5k bases, and did the same for the GC content.
+
+```{r}
+# Pad each dataset with zeros to reach 2.5 million elements
+desired_length <- 2500000
+
+# Function to pad a vector with zeros
+pad_with_zeros <- function(data, desired_length) {
+  current_length <- length(data)
+  if (current_length < desired_length) {
+    data <- c(data, rep(0, desired_length - current_length))
+  }
+  return(data)
+}
+
+# Apply padding to each dataset
+GC_100 <- pad_with_zeros(GC_100, desired_length)
+reads_100_A1 <- pad_with_zeros(reads_100_A1, desired_length)
+reads_100_B1 <- pad_with_zeros(reads_100_B1, desired_length)
+
+
+# Function to sum every 'n' elements into a new vector
+sum_every_n <- function(data, n) {
+  new_length <- length(data) %/% n
+  new_data <- numeric(new_length)
+  for (i in 1:new_length) {
+    start_idx <- (i - 1) * n + 1
+    end_idx <- i * n
+    new_data[i] <- sum(data[start_idx:end_idx])
+  }
+  return(new_data)
+}
+
+# Sum every 25 elements for each dataset
+new_GC_100 <- (sum_every_n(GC_100, 25))/25
+new_reads_100_A1 <- sum_every_n(reads_100_A1, 25)
+new_reads_100_B1 <- sum_every_n(reads_100_B1, 25)
+
+
+```
+
+
+Here are our results after removing outliers and fitting the spline regression: 
+
+**Note:** We already included the "Median correction" for both cases
+
+
+```{r,warning=FALSE}
+# Create a data frame for the regression model
+df <- data.frame(
+  cell_index = 1:length(new_reads_100_A1),
+  GC_content = new_GC_100,
+  reads_cancer = new_reads_100_A1,
+  reads_healthy = new_reads_100_B1
+)
+
+# filtering criteria
+filter_criteria <- function(data, reads_upper, gc_lower, gc_upper) {
+  index <- (data$reads_cancer <= reads_upper) & 
+           (data$reads_healthy <= reads_upper) &
+           (data$GC_content >= gc_lower) & 
+           (data$GC_content <= gc_upper)
+  return(data[index, ])
+}
+
+# Apply filtering 
+filtered_df <- filter_criteria(df, reads_upper = 350, gc_lower = 0.25, gc_upper = 0.75)
+
+# Median correction 
+filtered_df$ai_healthy <- filtered_df$reads_healthy / median(filtered_df$reads_healthy)
+filtered_df$ai_cancer <- filtered_df$reads_cancer / median(filtered_df$reads_cancer)
+
+# Fit spline regression models 
+healthy_spline_model <- lm(ai_healthy ~ ns(GC_content, df = 3), data = filtered_df)
+cancer_spline_model <- lm(ai_cancer ~ ns(GC_content, df = 3), data = filtered_df)
+
+# Generate predictions 
+predicted_gc <- seq(0.25, 0.75, length.out = 100)
+predicted_healthy_reads <- predict(healthy_spline_model, newdata = data.frame(GC_content = predicted_gc))
+predicted_cancer_reads <- predict(cancer_spline_model, newdata = data.frame(GC_content = predicted_gc))
+
+
+# plot for healthy sample
+p1 <- ggplot() +
+  geom_point(aes(x = filtered_df$GC_content, y = filtered_df$ai_healthy), alpha = 0.2, size = 0.5, color = "purple") +
+  geom_line(aes(x = predicted_gc, y = predicted_healthy_reads), color = "red") +
+  labs(title = "Healthy Sample", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25, 0.75) +
+  ylim(0, max(filtered_df$ai_healthy, na.rm = TRUE))
+
+# plot for cancer sample
+p2 <- ggplot() +
+  geom_point(aes(x = filtered_df$GC_content, y = filtered_df$ai_cancer), alpha = 0.2, size = 0.5, color = "steelblue") +
+  geom_line(aes(x = predicted_gc, y = predicted_cancer_reads), color = "red") +
+  labs(title = "Cancer Sample", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25, 0.75) +
+  ylim(0, max(filtered_df$ai_cancer, na.rm = TRUE))
+
+# Plot side by side
+grid.arrange(p1, p2, ncol = 2)
+```
+
+
+
+
+## Part A - Variance Composition (For Healthy Sample )
+
+Like we learned in class, we would like to show how the variance of the cells (reads) is divided by the components.
+
+We showed, that we can compute the requested variance by this formula:
+
+$$
+\text{Var}(Y) = \mathbb{E}(\text{Var}(Y \mid \text{GC})) + \text{Var}(\mathbb{E}(Y \mid \text{GC})).
+$$
+
+where:
+
+- \( \mathbb{E}(\text{Var}(Y \mid \text{GC})) \) is the variance that we can explain from the Poisson model that we learned.
+- \( \text{Var}(\mathbb{E}(Y \mid \text{GC})) \) is the variance due to the effect of the GC connection with the reads.
+
+What remains is the "noise" in the variance, which cannot be explained by the two components.
+
+
+```{r}
+# Variance from the Poisson model
+var_Y_GC <- c()
+for (gc in seq(0.25, 0.74, 0.01)){
+  var_Y_GC <- c(var_Y_GC, filtered_df[(filtered_df$GC_content < (gc+0.01)) & (filtered_df$GC_content >= gc),]$ai_healthy %>% var())
+}
+Pois_var <- mean(var_Y_GC, na.rm = TRUE)
+
+# Variance due to the effect of the GC
+filtered_df$fitted_health <- predict(healthy_spline_model, newdata = filtered_df)
+
+mean_Y_GC <- c()
+for (gc in seq(0.25, 0.74, 0.01)){
+  mean_Y_GC <- c(mean_Y_GC, abs(filtered_df[(filtered_df$GC_content < (gc+0.01)) & (filtered_df$GC_content >= gc),]$fitted_health %>% mean() - filtered_df[(filtered_df$GC_content < (gc+0.01)) & (filtered_df$GC_content >= gc),]$ai_healthy %>% mean()))
+}
+GC_var <- var(mean_Y_GC, na.rm = TRUE)
+
+# The inexplicable variance
+un_exp_var <- (var(filtered_df$ai_healthy) - Pois_var - GC_var)
+
+# The whole Y variance
+total_var <- var(filtered_df$ai_healthy)
+
+# Percentage of Y variance
+pois_var_percent <- round((Pois_var / total_var) * 100, 1)
+gc_var_percent <- round((GC_var / total_var) * 100, 1)
+unexp_var_percent <- round((un_exp_var / total_var) * 100, 1)
+
+# Print results in percentage format
+cat("Percentage of variance explained by the Poisson model:", pois_var_percent, "%\n")
+cat("Percentage of variance explained by the effect of GC:", gc_var_percent, "%\n")
+cat("Percentage of unexplained variance:", unexp_var_percent, "%\n")
+
+```
+
+
+**Results Explanations:**
+
+We can see that most of the variance is not explained at all by the components, probably indicating a low \(R^2\).
+
+What's more surprising is that the part of the variance explained by GC is extremely low compared to what we would expect.
+
+We believe this might have something to do with the median correction that we implemented in advance, but it could also be a mistake on our side.
+
+
+## Part B - Sample Comparison 
+
+### Question 2
+
+For a simple visual comparison, we take the trend curves from before and put them in one plot:
+
+```{r}
+# Combine predictions for visual comparison
+combined_df <- data.frame(
+  GC_content = rep(predicted_gc, 2),
+  Predicted_Reads = c(predicted_healthy_reads, predicted_cancer_reads),
+  Sample = rep(c("Healthy", "Cancer"), each = length(predicted_gc))
+)
+
+# Create combined plot
+ggplot(combined_df, aes(x = GC_content, y = Predicted_Reads, color = Sample)) +
+  geom_line() +
+  labs(title = "Comparison between the samples",
+       x = "GC Content",
+       y = "Number of Copies") +
+  scale_color_manual(values = c("Healthy" = "magenta", "Cancer" = "coral")) +
+  theme_minimal()
+```
+
+
+Then, we wanted to do some quantitative measure comparison, so we took the \(R^2\) and the correlation to GC content in both samples:
+
+
+```{r}
+# R-squared values
+r_squared_healthy <- summary(healthy_spline_model)$r.squared
+r_squared_cancer <- summary(cancer_spline_model)$r.squared
+
+# Calculate correlation 
+correlation_healthy <- cor(filtered_df$GC_content, filtered_df$reads_healthy, method = "pearson")
+correlation_cancer <- cor(filtered_df$GC_content, filtered_df$reads_cancer, method = "pearson")
+
+# Round to three decimal points
+r_squared_healthy <- round(r_squared_healthy, 3)
+r_squared_cancer <- round(r_squared_cancer, 3)
+correlation_healthy <- round(correlation_healthy, 3)
+correlation_cancer <- round(correlation_cancer, 3)
+
+# data frame for the table
+comparison_table <- data.frame(
+  Metric = c("R-squared", "Correlation"),
+  Healthy_Sample = c(r_squared_healthy, correlation_healthy),
+  Cancer_Sample = c(r_squared_cancer, correlation_cancer)
+)
+
+# Display the table
+knitr::kable(comparison_table, caption = "Quantitative measure Comparison")
+```
+
+
+**Results Explanations:**
+
+- There is a similar relationship between estimates and GC content for both cancer and healthy samples.both samples exhibit a quadratic pattern where estimates increases with GC content up to a certain peak and then decreases.this consistent pattern indicates that GC content has a significant impact on estimates in both types of samples.
+
+
+- While the general pattern of the relationship between GC content and estimates is the same (quadratic) for both cancer and healthy samples, the connection is not identical. The strength of the relationship, as indicated by the R-squared values, is greater in the cancer sample (0.659) compared to the healthy sample (0.498), suggesting that GC content explains a larger proportion of the variance in estimates in the cancer sample, as we might expect due to its meaning in terms of number of copies.additionally,the correlation between GC content and estimates is stronger in the cancer sample (0.755) than in the healthy sample (0.568), indicating a more robust connection in the cancer sample.
+
+**Note:** It appears that the \(R^2\) value we got for the healthy sample is almost a perfect match to the percentage that we got for the two components in part A, so maybe we did something right.
+
+
+### Question 3
+
+In preparation for the question, we will need to estimate the regression for the requested section.
+
+In our case, the part of the 25-30 million bases actually fit in the 10K place up to the 12K place.
+
+
+```{r,warning=FALSE}
+# Cells range for the 25M - 30M bases
+cell_range <- 10000:12000
+
+# Filter the data according to above
+filtered_segment <- df[cell_range, ]
+
+# Median correction 
+filtered_segment$ai_healthy <- filtered_segment$reads_healthy / median(filtered_segment$reads_healthy)
+filtered_segment$ai_cancer <- filtered_segment$reads_cancer / median(filtered_segment$reads_cancer)
+
+# Fit spline regression models 
+healthy_spline_segment <- lm(ai_healthy ~ ns(GC_content, df = 3), data = filtered_segment)
+cancer_spline_segment <- lm(ai_cancer ~ ns(GC_content, df = 3), data = filtered_segment)
+
+# Generate predictions 
+predicted_gc_segment <- seq(0.25, 0.75, length.out = 100)
+predicted_healthy_reads_segment <- predict(healthy_spline_segment, newdata = data.frame(GC_content = predicted_gc_segment))
+predicted_cancer_reads_segment <- predict(cancer_spline_segment, newdata = data.frame(GC_content = predicted_gc_segment))
+
+# plot for healthy sample 
+p1_segment <- ggplot() +
+  geom_point(aes(x = filtered_segment$GC_content, y = filtered_segment$ai_healthy), alpha = 0.2, size = 0.5, color = "purple") +
+  geom_line(aes(x = predicted_gc_segment, y = predicted_healthy_reads_segment), color = "red") +
+  labs(title = "Healthy Sample (25M - 30M bases)", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25, 0.75) +
+  ylim(0, max(filtered_segment$ai_healthy, na.rm = TRUE))
+
+# plot for cancer sample 
+p2_segment <- ggplot() +
+  geom_point(aes(x = filtered_segment$GC_content, y = filtered_segment$ai_cancer), alpha = 0.2, size = 0.5, color = "steelblue") +
+  geom_line(aes(x = predicted_gc_segment, y = predicted_cancer_reads_segment), color = "red") +
+  labs(title = "Cancer Sample (25M - 30M bases)", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25, 0.75) +
+  ylim(0, max(filtered_segment$ai_cancer, na.rm = TRUE))
+
+# Plot side by side
+grid.arrange(p1_segment, p2_segment, ncol = 2)
+```
+
+
+
+#### Section A
+
+We began with the estimation of the number of copies for both samples.
+
+In our case, we already did the median correction, so we will just compute their means:
+
+```{r}
+# Calculate the number of copies
+number_copies_healthy <- mean(filtered_segment$ai_healthy)
+number_copies_cancer <- mean(filtered_segment$ai_cancer)
+
+# Display the results
+cat("Estimated number of copies - healthy sample (25M - 30M bases):", round(number_copies_healthy, 3), "\n")
+cat("Estimated number of copies - cancer sample (25M - 30M bases):", round(number_copies_cancer, 3), "\n")
+```
+
+**Results Explanations:**
+
+First, we can see that both samples are close to 1 as we expected.
+
+From this simple result, we might conclude that the nature of a cancer sample is to have a shortage in the number of copies.
+
+We learn that what "builds" the assumption of 1 copy is that there are 2 genomic helices that complement each other from opposite directions, and when we get the value 1 for the estimator, it means that there are 2 such helices.
+
+The cancerous sample may show us that there is a tendency to find only one helix in a cancerous cell, and perhaps this is the problematic mutation.
+
+
+
+Now, we will see what the connection is between the estimated number of copies and the location on the chromosome:
+
+
+```{r}
+# Add a location column 
+filtered_segment$location <- seq(25e6, 30e6, length.out = length(cell_range))
+
+# plot for healthy sample in the specific segment
+p1_segment <- ggplot() +
+  geom_line(aes(x = filtered_segment$location, y = filtered_segment$ai_healthy), color = "magenta") +
+  labs(title = "Healthy Sample (25M - 30M bases)", 
+       x = "Location", 
+       y = "Number of Copies") +
+  theme_minimal()
+
+# plot for cancer sample in the specific segment
+p2_segment <- ggplot() +
+  geom_line(aes(x = filtered_segment$location, y = filtered_segment$ai_cancer), color = "coral") +
+  labs(title = "Cancer Sample (25M - 30M bases)", 
+       x = "Location", 
+       y = "Number of Copies") +
+  theme_minimal()
+
+# Plot one above the other 
+grid.arrange(p1_segment, p2_segment, ncol = 1)
+```
+
+
+**Results Explanations:**
+
+At first glance, it seems that the patterns show pretty much the same trends in both samples, but with small changes.
+
+One notable difference is around the 28.5M area, where the cancer sample shows a major drop to 0.5 in the number of copies, in contrast to the healthy sample, which stays around the value of 1.
+
+We will continue to investigate this point in section B & C.
+
+
+
+We also did a small comparison between the estimate for the number of copies with median correction only to the estimate for the number of copies with median correction and GC effect: 
+
+```{r}
+# median correction  in the specific segment
+filtered_segment$ai_healthy <- filtered_segment$reads_healthy / median(filtered_segment$reads_healthy)
+filtered_segment$ai_cancer <- filtered_segment$reads_cancer / median(filtered_segment$reads_cancer)
+
+# Calculate the number of copies with median correction only
+number_of_copies_healthy_median <- mean(filtered_segment$ai_healthy)
+number_of_copies_cancer_median <- mean(filtered_segment$ai_cancer)
+
+# Fit spline regression models in the specific segment
+healthy_spline_segment <- lm(reads_healthy ~ ns(GC_content, df = 3), data = filtered_segment)
+cancer_spline_segment <- lm(reads_cancer ~ ns(GC_content, df = 3), data = filtered_segment)
+
+# Generate predictions 
+predicted_gc_segment <- seq(0, 1, length.out = 100)
+predicted_healthy_reads_segment <- predict(healthy_spline_segment, newdata = data.frame(GC_content = predicted_gc_segment))
+predicted_cancer_reads_segment <- predict(cancer_spline_segment, newdata = data.frame(GC_content = predicted_gc_segment))
+
+# Calculate the number of copies with median correction and GC effect
+number_of_copies_healthy_gc <- mean(predicted_healthy_reads_segment/median(predicted_healthy_reads_segment))
+number_of_copies_cancer_gc <- mean(predicted_cancer_reads_segment/median(predicted_cancer_reads_segment))
+
+# Round to three decimal points
+number_of_copies_healthy_median <- round(number_of_copies_healthy_median, 3)
+number_of_copies_cancer_median <- round(number_of_copies_cancer_median, 3)
+number_of_copies_healthy_gc <- round(number_of_copies_healthy_gc, 3)
+number_of_copies_cancer_gc <- round(number_of_copies_cancer_gc, 3)
+
+# Create a data frame to display the results
+comparison_table <- data.frame(
+  Sample = c("Healthy", "Cancer"),
+  Median_Correction_Only = c(number_of_copies_healthy_median, number_of_copies_cancer_median),
+  Median_Correction_and_GC_Effect = c(number_of_copies_healthy_gc, number_of_copies_cancer_gc)
+)
+
+# Display the table
+knitr::kable(comparison_table, caption = "Number of Copies Estimate")
+```
+
+
+
+**Results Explanations:**
+
+- For the healthy sample, using the GC-based correction is very important. When we only use the median correction, the estimated number of copies is about 0.967, which is close to the expected number for a healthy sample. However, when we factor in the GC content, the estimate drops to 0.376. This big difference suggests that the initial estimate was too high because it didn't account for how the GC content affects the read coverage. 
+
+**Note:** We believe that the "median correction with GC effect" number might be too low.
+
+- For the cancer sample, the GC-based correction doesn't make as much of a difference. The estimated number of copies is 0.951 with just the median correction, and it slightly increases to 0.981 when we add the GC content. This small change indicates that GC content doesn't significantly impact the read coverage in the cancer sample. Therefore, this suggests that other factors might be influencing the read coverage in the cancer sample more than GC content.
+
+
+#### Section B
+
+Now, we will continue our investigation into the connection between the estimated number of copies and the location on the chromosome.
+
+We will begin with the cancer sample and try to locate cell sequences in which a change in the number of copies is possible.
+
+We chose to define a possible change in the number of copies in a way that is relevant to our purpose.
+
+If we get a cell with a value of 0.5, we mark it with a dashed vertical blue line, and if we get a cell with a value of 1.5, we mark it with a dashed vertical green line.
+
+Also, we wanted to located their cell index so we printed that as well:
+
+```{r,warning=FALSE}
+# Identify specific estimation values
+locations_0_5 <- filtered_segment$cell_index[abs(filtered_segment$ai_cancer - 0.5) < 0.05]
+locations_1_5 <- filtered_segment$cell_index[abs(filtered_segment$ai_cancer - 1.5) < 0.05]
+
+# Function to format consecutive locations
+format_consecutive <- function(locations) {
+  locations <- sort(locations)
+  if (length(locations) == 0) return(character(0))
+  consecutive_ranges <- c()
+  start <- locations[1]
+  end <- locations[1]
+  for (i in 2:length(locations)) {
+    if (locations[i] == end + 1) {
+      end <- locations[i]
+    } else {
+      if (start == end) {
+        consecutive_ranges <- c(consecutive_ranges, as.character(start))
+      } else {
+        consecutive_ranges <- c(consecutive_ranges, paste(start, "-", end))
+      }
+      start <- locations[i]
+      end <- locations[i]
+    }
+  }
+  if (start == end) {
+    consecutive_ranges <- c(consecutive_ranges, as.character(start))
+  } else {
+    consecutive_ranges <- c(consecutive_ranges, paste(start, "-", end))
+  }
+  return(consecutive_ranges)
+}
+
+# Format consecutive locations
+formatted_locations_0_5 <- format_consecutive(locations_0_5)
+formatted_locations_1_5 <- format_consecutive(locations_1_5)
+
+# plot for cancer sample 
+p_cancer <- ggplot() +
+  geom_line(aes(x = filtered_segment$location, y = filtered_segment$ai_cancer), color = "coral") +
+  geom_vline(xintercept = filtered_segment$location[filtered_segment$cell_index %in% locations_0_5], color = "blue", linetype = "dashed", size = 0.3) +
+  geom_vline(xintercept = filtered_segment$location[filtered_segment$cell_index %in% locations_1_5], color = "darkgreen", linetype = "dashed", size = 0.3) +
+  labs(title = "Cancer Sample (25M - 30M bases) ",
+       x = "Location",
+       y = "Read Coverage") +
+  theme_minimal()
+
+# Display the plot
+print(p_cancer)
+
+# Function to print locations nicely
+print_nicely <- function(locations, title) {
+  cat(title, "\n\n")
+  for (i in seq_along(locations)) {
+    cat(locations[i])
+    if (i %% 5 == 0 || i == length(locations)) {
+      cat("\n")
+    } else {
+      cat(", ")
+    }
+  }
+  cat("\n")
+}
+
+# Display locations 
+print_nicely(formatted_locations_0_5, "Cell locations with estimate ~0.5:")
+print_nicely(formatted_locations_1_5, "Cell locations with estimate ~1.5:")
+```
+
+
+#### Section C
+
+Let's implement the same idea from Section B to our healthy sample in order to catch some meaningful differences:
+
+
+```{r}
+# Identify specific estimation values
+locations_0_5_healthy <- filtered_segment$cell_index[abs(filtered_segment$ai_healthy - 0.5) < 0.05]
+locations_1_5_healthy <- filtered_segment$cell_index[abs(filtered_segment$ai_healthy - 1.5) < 0.05]
+
+# Function to format consecutive locations
+format_consecutive <- function(locations) {
+  locations <- sort(locations)
+  if (length(locations) == 0) return(character(0))
+  consecutive_ranges <- c()
+  start <- locations[1]
+  end <- locations[1]
+  for (i in 2:length(locations)) {
+    if (locations[i] == end + 1) {
+      end <- locations[i]
+    } else {
+      if (start == end) {
+        consecutive_ranges <- c(consecutive_ranges, as.character(start))
+      } else {
+        consecutive_ranges <- c(consecutive_ranges, paste(start, "-", end))
+      }
+      start <- locations[i]
+      end <- locations[i]
+    }
+  }
+  if (start == end) {
+    consecutive_ranges <- c(consecutive_ranges, as.character(start))
+  } else {
+    consecutive_ranges <- c(consecutive_ranges, paste(start, "-", end))
+  }
+  return(consecutive_ranges)
+}
+
+# Format consecutive locations
+formatted_locations_0_5_healthy <- format_consecutive(locations_0_5_healthy)
+formatted_locations_1_5_healthy <- format_consecutive(locations_1_5_healthy)
+
+# plot for healthy sample 
+p_healthy <- ggplot() +
+  geom_line(aes(x = filtered_segment$location, y = filtered_segment$ai_healthy), color = "magenta") +
+  geom_vline(xintercept = filtered_segment$location[filtered_segment$cell_index %in% locations_0_5_healthy], color = "blue", linetype = "dashed", size = 0.3) +
+  geom_vline(xintercept = filtered_segment$location[filtered_segment$cell_index %in% locations_1_5_healthy], color = "darkgreen", linetype = "dashed", size = 0.3) +
+  labs(title = "Healthy Sample (25M - 30M bases)",
+       x = "Location ",
+       y = "Read Coverage") +
+  theme_minimal()
+
+# Display the plot
+print(p_healthy)
+
+# Function to print locations nicely
+print_nicely <- function(locations, title) {
+  cat(title, "\n\n")
+  for (i in seq_along(locations)) {
+    cat(locations[i])
+    if (i %% 5 == 0 || i == length(locations)) {
+      cat("\n")
+    } else {
+      cat(", ")
+    }
+  }
+  cat("\n")
+}
+
+# Display locations 
+print_nicely(formatted_locations_0_5_healthy, "Cell locations with estimate ~0.5 (Healthy):")
+print_nicely(formatted_locations_1_5_healthy, "Cell locations with estimate ~1.5 (Healthy):")
+```
+
+
+
+```{r}
+# Identify specific values for cancer sample
+locations_0_5_cancer <- filtered_segment$cell_index[abs(filtered_segment$ai_cancer - 0.5) < 0.05]
+locations_1_5_cancer <- filtered_segment$cell_index[abs(filtered_segment$ai_cancer - 1.5) < 0.05]
+
+# Identify specific values for healthy sample
+locations_0_5_healthy <- filtered_segment$cell_index[abs(filtered_segment$ai_healthy - 0.5) < 0.05]
+locations_1_5_healthy <- filtered_segment$cell_index[abs(filtered_segment$ai_healthy - 1.5) < 0.05]
+
+# Combine locations for each sample
+locations_cancer <- c(locations_0_5_cancer, locations_1_5_cancer)
+locations_healthy <- c(locations_0_5_healthy, locations_1_5_healthy)
+
+# Find intersections and differences
+common_cells <- intersect(locations_cancer, locations_healthy)
+different_cells <- union(setdiff(locations_cancer, locations_healthy), setdiff(locations_healthy, locations_cancer))
+
+# Function to print a list of locations 
+print_nice_list <- function(locations, title) {
+  cat(title, "\n")
+  if (length(locations) == 0) {
+    cat("None\n")
+  } else {
+    for (i in seq_along(locations)) {
+      cat(locations[i])
+      if (i %% 5 == 0 || i == length(locations)) {
+        cat("\n")
+      } else {
+        cat(", ")
+      }
+    }
+  }
+  cat("\n")
+}
+
+# Print common and different cells
+print_nice_list(common_cells, "Cells that are the same between samples:")
+print_nice_list(different_cells, "Cells that are different between samples:")
+
+
+```
+```{r}
+# Define the range intervals
+ranges <- list(
+  "10000 - 10250" = 10000:10250,
+  "10250 - 10500" = 10251:10500,
+  "10500 - 10750" = 10501:10750,
+  "10750 - 11000" = 10751:11000,
+  "11000 - 11250" = 11001:11250,
+  "11250 - 11500" = 11251:11500,
+  "11500 - 11750" = 11501:11750,
+  "11750 - 12000" = 11751:12000
+)
+
+# Function to categorize cells into ranges
+categorize_cells <- function(cells, ranges) {
+  categorized_cells <- list()
+  for (range_name in names(ranges)) {
+    categorized_cells[[range_name]] <- cells[cells %in% ranges[[range_name]]]
+  }
+  return(categorized_cells)
+}
+
+# Categorize the different cells
+categorized_cells <- categorize_cells(different_cells, ranges)
+
+# Print the cells
+for (range_name in names(categorized_cells)) {
+  cat(range_name, ":\n", paste(categorized_cells[[range_name]], collapse = ", "), "\n\n")
+}
+```
+
+
+**Results Explanations:**
+
+So, we can see there are many cells that are considered different in terms of the estimation of the number of copies between the samples.
+
+We can see that mostly at the end of the segment of bases we chose, there are differences in the number of copies between the samples, and most of these are marked in blue, which strengthens our assumption from Section A.
+
+It seems that at the end of the segment, there is a missing helix in the cancer sample!
+
+
+#### Section D
+
+
+```{r}
+# Create a data frame for the scatter plot
+scatter_data <- data.frame(
+  Cell_Index = filtered_segment$cell_index,
+  Healthy_Copies = filtered_segment$ai_healthy,
+  Cancer_Copies = filtered_segment$ai_cancer
+)
+
+# Create scatter plot with 45-degree line
+scatter_plot <- ggplot(scatter_data, aes(x = Healthy_Copies, y = Cancer_Copies)) +
+  geom_point(alpha = 0.5, color = "steelblue") +
+  labs(title = "Healthy vs Cancer Estimates",
+       x = "Healthy Sample",
+       y = "Cancer Sample") +
+  theme_minimal() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "coral")
+
+# Display the plot
+print(scatter_plot)
+
+```
+
+
+**Results Explanations:**
+
+What we are seeing is not surprising in any way. The orange line marks what we would expect in a perfect world with two healthy cells and no differences in the number of copies.
+
+Of course, we observe a lot more variety from this line.
+
+- We can think of a relative visual estimate to the problem of different numbers of copies as the distance that a specific cell is found from this line. the larger the distance gets, the more we could become suspicious about the nature of this cell and whether it is the main cause of the cancer.
+
+
+## Short summary
+
+If we are right with our analysis, it seems that problematic areas, until the very end, are mostly marked as missing helix, which is connected to the cancer sample.
+
+This is a pretty strong statement, so we need to remember that we could be mistaken and that there are many elements (including the unexplained variance) that could alter the nature of our results.
+
