@@ -1,0 +1,547 @@
+---
+title: "Comparing four copy-number estimators"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 16 July, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+
+
+```
+
+
+### Libraries used
+
+```{r}
+# Load libraries
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+library(splines)
+library(knitr)
+```
+
+### Paths and Data
+
+```{r}
+# Loading file path where the cancer data is stored 
+load(file = 'data/reads_100_A1.rda')
+
+# Loading file path where the health data is stored
+load(file = 'data/reads_100_B1.rda')
+
+# Load the data for GC count
+load(file = 'data/GC_100.rda')
+```
+
+## Introduction
+
+In this week’s task, we will examine and compare four kinds of estimates for the number of copies of a cell.
+
+We will try to highlight the pros and cons of each method and also check their influence on different areas of the chromosome, considering the logic of the GC effect.
+
+## Setup - Preliminary part
+
+To make the process easier, we added 0 values to each file to represent 0 reads in a cell or 0 GC count in every cell. This is only for the purpose of ensuring equal cell size along the entire 250M length of the chromosome.
+
+We will eventually clean the data and remove outliers so that the illogical parts (0 GC count in every cell) will not matter.
+
+As requested, we created 100k cells for the cancer sample and healthy sample, each cell containing 2.5k bases, and did the same for the GC content.
+
+```{r}
+# Pad each dataset with zeros to reach 2.5 million elements
+desired_length <- 2500000
+
+# Function to pad a vector with zeros
+pad_with_zeros <- function(data, desired_length) {
+  current_length <- length(data)
+  if (current_length < desired_length) {
+    data <- c(data, rep(0, desired_length - current_length))
+  }
+  return(data)
+}
+
+# Apply padding to each dataset
+GC_100 <- pad_with_zeros(GC_100, desired_length)
+reads_100_A1 <- pad_with_zeros(reads_100_A1, desired_length)
+reads_100_B1 <- pad_with_zeros(reads_100_B1, desired_length)
+
+# Function to sum every 'n' elements into a new vector
+sum_every_n <- function(data, n) {
+  new_length <- length(data) %/% n
+  new_data <- numeric(new_length)
+  for (i in 1:new_length) {
+    start_idx <- (i - 1) * n + 1
+    end_idx <- i * n
+    new_data[i] <- sum(data[start_idx:end_idx])
+  }
+  return(new_data)
+}
+
+# Sum every 25 elements for each dataset
+new_GC_100 <- (sum_every_n(GC_100, 25))/25
+new_reads_100_A1 <- sum_every_n(reads_100_A1, 25)
+new_reads_100_B1 <- sum_every_n(reads_100_B1, 25)
+```
+
+## Part A - Comparing Estimation Methods
+
+Before we begin with our methods, we need to create the partition of the data that separates the 25M - 30M region in terms of cells and the 75M - 80M region in terms of cells.
+
+We calculated and found:
+
+25M - 30M location on the chromosome -\> 10K - 12K cells
+
+75M - 80M location on the chromosome -\> 30K - 32K cells
+
+```{r}
+# Create the 25M - 30M location dataset
+loc_GC_100_A <- new_GC_100[10000:11999]
+loc_reads_A1_A <- new_reads_100_A1[10000:11999]
+loc_reads_B1_A <- new_reads_100_B1[10000:11999]
+
+loc_25m_30m <- data.frame(
+  GC_Content = loc_GC_100_A,
+  Reads_A1 = loc_reads_A1_A,
+  Reads_B1 = loc_reads_B1_A
+)
+
+# Create the 75M - 80M location dataset
+loc_GC_100_B <- new_GC_100[30000:31999]
+loc_reads_A1_B <- new_reads_100_A1[30000:31999]
+loc_reads_B1_B <- new_reads_100_B1[30000:31999]
+
+loc_75m_80m <- data.frame(
+  GC_Content = loc_GC_100_B,
+  Reads_A1 = loc_reads_A1_B,
+  Reads_B1 = loc_reads_B1_B
+)
+```
+
+### Question 1 - Just Median Correction :
+
+Our first method is a simple median correction with no GC correction whatsoever.
+
+We created histograms for both location regions and for both sample estimators in each group (cancer and healthy).
+
+```{r}
+# Just med correction to 25m - 30m health
+loc_25m_30m$med_cor_health <- loc_25m_30m$Reads_B1 / median(loc_25m_30m$Reads_B1)
+
+# Just med correction to 25m - 30m cancer
+loc_25m_30m$med_cor_cancer <- loc_25m_30m$Reads_A1 / median(loc_25m_30m$Reads_A1)
+
+# Set up the plotting area for a 1x2 grid
+par(mfrow = c(1, 2))
+
+# Plot histograms 
+hist(loc_25m_30m$med_cor_health, breaks = 15, main = "", xlab = "Estimate", col = "steelblue")
+title(main = "Health", line = 0.5, cex.main = 1.5)
+
+hist(loc_25m_30m$med_cor_cancer, breaks = 15, main = "", xlab = "Estimate", col = "coral")
+title(main = "Cancer", line = 0.5, cex.main = 1.5)
+
+# Add a headline 
+mtext("Median Correction Only: 25M - 30M", outer = TRUE, cex = 1.2, line = -1)
+```
+
+```{r}
+# Just med correction to 75m - 80m health
+loc_75m_80m$med_cor_health <- loc_75m_80m$Reads_B1 / median(loc_75m_80m$Reads_B1)
+
+# Just med correction to 75m - 80m cancer
+loc_75m_80m$med_cor_cancer <- loc_75m_80m$Reads_A1 / median(loc_75m_80m$Reads_A1)
+
+# Set up the plotting area for a 1x2 grid
+par(mfrow = c(1, 2))
+
+# Plot histograms 
+hist(loc_75m_80m$med_cor_health, breaks = 15, main = "", xlab = "Estimate", col = "steelblue")
+title(main = "Health", line = 0.5, cex.main = 1.5)
+
+hist(loc_75m_80m$med_cor_cancer, breaks = 15, main = "", xlab = "Estimate", col = "coral")
+title(main = "Cancer", line = 0.5, cex.main = 1.5)
+
+# Add headline 
+mtext("Median Correction Only: 75M - 80M", outer = TRUE, cex = 1.2, line = -1)
+```
+
+Here, we added a location comparison plot that will serve as a benchmark for the effect of GC in different locations:
+
+```{r}
+# Prepare the data for plotting
+loc_25m_30m$Index <- 1:nrow(loc_25m_30m)
+loc_75m_80m$Index <- (nrow(loc_25m_30m) + 1):(nrow(loc_25m_30m) + nrow(loc_75m_80m))
+
+# Adjust the margins 
+par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
+
+# Plot health 
+plot(loc_25m_30m$Index, loc_25m_30m$med_cor_health, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, loc_75m_80m$med_cor_health, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Health", pos = 4, cex = 1.2, col = "steelblue")  
+
+# Plot cancer 
+plot(loc_25m_30m$Index, loc_25m_30m$med_cor_cancer, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, loc_75m_80m$med_cor_cancer, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Cancer", pos = 4, cex = 1.2, col = "coral")  
+```
+
+**Results Explanations:**
+
+For our first method, we obtained pretty similar plots in terms of location when comparing cancer to healthy samples. However, when we compare the same sample across different locations (the location plot), we can see that the trends are not the same.
+
+### Question 2 - One sample:
+
+Now, we make the preparations for the one-sample estimator.
+
+We want to apply the GC effect to each sample separately (this is why it is called “one sample”).
+
+Of course, we will also check how the location is affected by it because, as we already know, the GC content is not the same across the entire chromosome.
+
+```{r}
+# Fit the regression model 25m -30M health 
+f_25m_30m_health <- lm(Reads_B1 ~ bs(GC_Content, degree = 3), data = loc_25m_30m)
+
+loc_25m_30m$predicted_values_health <- predict(f_25m_30m_health)
+
+# Fit the regression model 25m -30M cancer 
+f_25m_30m_cancer <- lm(Reads_A1 ~ bs(GC_Content, degree = 3), data = loc_25m_30m)
+
+loc_25m_30m$predicted_values_can <- predict(f_25m_30m_cancer)
+
+# Fit the regression model 75m -80M health 
+f_75m_80m_health <- lm(Reads_B1 ~ bs(GC_Content, degree = 3), data = loc_75m_80m)
+
+loc_75m_80m$predicted_values_health <- predict(f_75m_80m_health)
+
+# Fit the regression model 75m -80M cancer 
+f_75m_80m_cancer <- lm(Reads_A1 ~ bs(GC_Content, degree = 3), data = loc_75m_80m)
+
+loc_75m_80m$predicted_values_can <- predict(f_75m_80m_cancer)
+
+# One sample GC corrcet 
+one_sample_correct = function(samp, preds, eps) {
+  one_correct = (samp+eps)/(preds+eps)
+  adj_med = 1/median(one_correct)
+  return(adj_med * one_correct)
+}
+
+eps = 1
+
+# The 25m -30m case
+corrected_health_25m_30m = one_sample_correct (loc_25m_30m$Reads_B1,loc_25m_30m$predicted_values_health,eps)
+
+uncorrected_health_25m_30m = one_sample_correct(loc_25m_30m$Reads_B1,rep(1,length(loc_25m_30m$Reads_B1)),eps)
+
+corrected_cancer_25m_30m = one_sample_correct (loc_25m_30m$Reads_A1,loc_25m_30m$predicted_values_can,eps)
+
+uncorrected_cancer_25m_30m = one_sample_correct(loc_25m_30m$Reads_A1,rep(1,length(loc_25m_30m$Reads_A1)),eps)
+
+# The 75m -80m case
+corrected_health_75m_80m = one_sample_correct (loc_75m_80m$Reads_B1,loc_75m_80m$predicted_values_health,eps)
+
+uncorrected_health_75m_80m = one_sample_correct(loc_75m_80m$Reads_B1,rep(1,length(loc_75m_80m$Reads_B1)),eps)
+
+corrected_cancer_75m_80m = one_sample_correct (loc_75m_80m$Reads_A1,loc_75m_80m$predicted_values_can,eps)
+
+uncorrected_cancer_75m_80m = one_sample_correct(loc_75m_80m$Reads_A1,rep(1,length(loc_75m_80m$Reads_A1)),eps)
+```
+
+Here, we create the plot by location in the same way we did earlier.
+
+We will have one plot of corrected vs. uncorrected for the cancer sample and one for the healthy sample.
+
+```{r}
+# Adjust the margins 
+par(mfrow = c(2, 1), mar = c(2, 2, 2, 2))
+
+# Plot corrected data
+plot(loc_25m_30m$Index, corrected_cancer_25m_30m, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, corrected_cancer_75m_80m, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Corrected - cancer", pos = 4, cex = 1.2, col = "black")
+
+# Plot uncorrected data
+plot(loc_25m_30m$Index, uncorrected_cancer_25m_30m, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, uncorrected_cancer_75m_80m, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Uncorrected - cancer", pos = 4, cex = 1.2, col = "black")
+```
+
+```{r}
+# Adjust the margins 
+par(mfrow = c(2, 1), mar = c(2, 2, 2, 2))
+
+# Plot corrected data
+plot(loc_25m_30m$Index, corrected_health_25m_30m, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, corrected_health_75m_80m, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Corrected - health", pos = 4, cex = 1.2, col = "black")
+
+# Plot uncorrected data
+plot(loc_25m_30m$Index, uncorrected_health_25m_30m, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", ylab = "", xlim = c(0, 4000), cex = 0.2)
+points(loc_75m_80m$Index, uncorrected_health_75m_80m, pch = 16, col = "black", cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(500, 2.9, "Uncorrected - health", pos = 4, cex = 1.2, col = "black")
+```
+
+**Results Explanations:**
+
+It looks like the main point we are trying to show is evident: when we apply the one-sample correction, the problematic areas in terms of the number of copy estimators (like the 26.8M area) are much more obvious in the plot.
+
+**Note:** In class, we were able to show it even more clearly, probably due to some mistake in our code or more accurate filtering of outliers performed in class.
+
+### Question 3 - Two sample, No GC:
+
+```{r}
+# Two sample correction function
+two_sample_correct_e = function(tumor, normal,eps = 1) {
+  two_correct = (tumor+eps)/(normal+eps)
+  two_correct_aft_med = two_correct/median(two_correct,na.rm=TRUE)
+  return(two_correct_aft_med)
+}
+
+# Two sample, No GC: 25M - 30M
+two_samp_No_GC_25m_30m <- two_sample_correct_e(uncorrected_cancer_25m_30m,uncorrected_health_25m_30m) 
+
+# Two sample, No GC: 75M - 80M
+two_samp_No_GC_75m_80m <- two_sample_correct_e(uncorrected_cancer_75m_80m,uncorrected_health_75m_80m) 
+```
+
+```{r}
+# Combine the data for plotting
+combined_data <- data.frame(
+  Index = c(loc_25m_30m$Index, loc_75m_80m$Index),
+  TwoSampleNoGC = c(two_samp_No_GC_25m_30m, two_samp_No_GC_75m_80m),
+  Location = rep(c("25M-30M", "75M-80M"), c(length(two_samp_No_GC_25m_30m), length(two_samp_No_GC_75m_80m)))
+)
+
+# Set up the plotting area 
+par(mfrow = c(1, 1), mar = c(2, 2, 2, 2))
+
+# Plot two sample, No GC 
+plot(combined_data$Index, combined_data$TwoSampleNoGC, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", xlim = c(0, max(combined_data$Index)), cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(max(combined_data$Index) / 4, 2.8, "Two Sample - No GC", pos = 3, cex = 1, col = "black")
+```
+
+### Question 4 - Two sample, With GC:
+
+```{r}
+# Two sample, With GC: 25M - 30M
+two_samp_with_GC_25m_30m <- two_sample_correct_e(corrected_cancer_25m_30m,corrected_health_25m_30m)
+
+# Two sample, With GC: 75M - 80M
+two_samp_with_GC_75m_80m <- two_sample_correct_e(corrected_cancer_75m_80m,corrected_health_75m_80m)
+```
+
+```{r}
+# Combine the data for plotting
+combined_data_with_gc <- data.frame(
+  Index = c(loc_25m_30m$Index, loc_75m_80m$Index),
+  TwoSampleWithGC = c(two_samp_with_GC_25m_30m, two_samp_with_GC_75m_80m),
+  Location = rep(c("25M-30M", "75M-80M"), c(length(two_samp_with_GC_25m_30m), length(two_samp_with_GC_75m_80m)))
+)
+
+# Set up the plotting area 
+par(mfrow = c(1, 1), mar = c(2, 2, 2, 2))
+
+# Plot two sample, With GC 
+plot(combined_data_with_gc$Index, combined_data_with_gc$TwoSampleWithGC, ylim = c(0, 3), pch = 16, col = "black",
+     xlab = "Index", xlim = c(0, max(combined_data_with_gc$Index)), cex = 0.2)
+abline(h = 1, col = "blue", lty = 1)
+abline(v = nrow(loc_25m_30m), col = "red", lty = 2)
+text(max(combined_data_with_gc$Index) / 4, 2.8, "Two Sample - With GC", pos = 3, cex = 1, col = "black")
+```
+
+**Results Explanations:**
+
+When we look at the results of the “Two sample” methods, we find that some areas we might have thought were problematic (like the 26.8M area) are “canceled out” by the estimation noise combined from both samples, which might disqualify it as a problematic area in terms of the number of copies.
+
+On the other hand, we revealed that the 28.75M area, even with the GC effect taken into consideration, is lower than the expected value of one copy, which might indicate a true copy number problem in this area of the chromosome.
+
+## Part B - Quantitative measure <span class="math inline">\\MAD\\</span>
+
+As a quantitative measure, we chose the <span class="math inline">\\MAD\\</span> - mean absolute deviation.
+
+What it does is take the “a” estimates we got, subtract 1 from each, and then take the absolute value (because we don’t care in which direction it deviates from 1 right now, just that it is far from 1).
+
+We did this only for the Two sample methods: with and without GC correction.
+
+```{r}
+# Function to calculate MAD for each cell
+calculate_mad_per_cell <- function(observed, expected) {
+  mad_per_cell <- abs(observed - expected)
+  return(mad_per_cell)
+}
+
+# Expected value
+expected_value <- 1
+
+# Calculate MAD per cell for two sample methods
+mad_two_sample_no_gc_25m_30m <- calculate_mad_per_cell(two_samp_No_GC_25m_30m, expected_value)
+mad_two_sample_no_gc_75m_80m <- calculate_mad_per_cell(two_samp_No_GC_75m_80m, expected_value)
+mad_two_sample_with_gc_25m_30m <- calculate_mad_per_cell(two_samp_with_GC_25m_30m, expected_value)
+mad_two_sample_with_gc_75m_80m <- calculate_mad_per_cell(two_samp_with_GC_75m_80m, expected_value)
+
+# Combine MAD values with their indexes
+mad_two_sample_no_gc_25m_30m_df <- data.frame(Index = loc_25m_30m$Index, MAD = mad_two_sample_no_gc_25m_30m)
+mad_two_sample_no_gc_75m_80m_df <- data.frame(Index = loc_75m_80m$Index, MAD = mad_two_sample_no_gc_75m_80m)
+mad_two_sample_with_gc_25m_30m_df <- data.frame(Index = loc_25m_30m$Index, MAD = mad_two_sample_with_gc_25m_30m)
+mad_two_sample_with_gc_75m_80m_df <- data.frame(Index = loc_75m_80m$Index, MAD = mad_two_sample_with_gc_75m_80m)
+
+# Function to get top 10 MAD values
+get_top_10 <- function(df) {
+  df[order(df$MAD, decreasing = TRUE)[1:10], ]
+}
+
+# Print top 10 MAD values for each method
+print("Top 10 MAD values for Two Sample No GC 25M-30M:")
+```
+
+    ## [1] "Top 10 MAD values for Two Sample No GC 25M-30M:"
+
+```{r}
+get_top_10(mad_two_sample_no_gc_25m_30m_df)
+```
+
+    ##      Index       MAD
+    ## 1731  1731 0.3003539
+    ## 1442  1442 0.2827583
+    ## 1435  1435 0.2746664
+    ## 1453  1453 0.2738227
+    ## 922    922 0.2617507
+    ## 496    496 0.2608868
+    ## 405    405 0.2541419
+    ## 670    670 0.2480730
+    ## 698    698 0.2479113
+    ## 1434  1434 0.2442065
+
+```{r}
+print("Top 10 MAD values for Two Sample No GC 75M-80M:")
+```
+
+    ## [1] "Top 10 MAD values for Two Sample No GC 75M-80M:"
+
+```{r}
+get_top_10(mad_two_sample_no_gc_75m_80m_df)
+```
+
+    ##      Index       MAD
+    ## 411   2411 0.4021179
+    ## 1518  3518 0.3504818
+    ## 1110  3110 0.3344916
+    ## 1974  3974 0.3124201
+    ## 1198  3198 0.3107922
+    ## 844   2844 0.3001457
+    ## 1170  3170 0.2791251
+    ## 77    2077 0.2644867
+    ## 1286  3286 0.2572496
+    ## 151   2151 0.2572324
+
+```{r}
+print("Top 10 MAD values for Two Sample With GC 25M-30M:")
+```
+
+    ## [1] "Top 10 MAD values for Two Sample With GC 25M-30M:"
+
+```{r}
+get_top_10(mad_two_sample_with_gc_25m_30m_df)
+```
+
+    ##      Index        MAD
+    ## 328    328 21.5293305
+    ## 1902  1902  2.0281638
+    ## 1730  1730  1.0638924
+    ## 760    760  0.4868029
+    ## 1946  1946  0.3692991
+    ## 1964  1964  0.2835827
+    ## 1453  1453  0.2764451
+    ## 1442  1442  0.2744657
+    ## 1435  1435  0.2704045
+    ## 1314  1314  0.2685058
+
+```{r}
+print("Top 10 MAD values for Two Sample With GC 75M-80M:")
+```
+
+    ## [1] "Top 10 MAD values for Two Sample With GC 75M-80M:"
+
+```{r}
+get_top_10(mad_two_sample_with_gc_75m_80m_df)
+```
+
+    ##      Index       MAD
+    ## 1245  3245 0.7321954
+    ## 451   2451 0.4316569
+    ## 1824  3824 0.2974595
+    ## 1349  3349 0.2850015
+    ## 1198  3198 0.2659812
+    ## 1126  3126 0.2659430
+    ## 976   2976 0.2434783
+    ## 1075  3075 0.2409149
+    ## 402   2402 0.2399086
+    ## 1268  3268 0.2348532
+
+**Results Explanations:**
+
+The <span class="math inline">\\MAD\\</span> confirmed a bit of what we thought.
+
+When we look at the “Top 10 MAD values for Two Sample No GC 25M-30M,” we can see that the 26.8M area is the main concern.
+
+However, when we compare it to the “Top 10 MAD values for Two Sample With GC 25M-30M”, we find, as before, that the 28.75M area is probably the area we want to keep an eye on.
+
+**Note:** The indexes in the lists above are not the locations on the chromosome itself. We need to keep in mind the adjustment to the right location whenever reading them.
+
+## Part C - Pros & Cons
+
+- Correcting a single sample for GC content helps fix distortions in read counts caused by varying GC content in the DNA.It’s also pretty easy and straightforward since it involves just one sample.However,it only corrects biases in that one sample, and only depends on it, which might not reflect broader trends.
+
+- Comparing two samples without GC correction highlights differences in copy number variations, canceling out some systematic biases,mostly useful for comparing conditions like cancer vs. healthy.However, GC bias remains unaddressed, potentially affecting the results.
+
+- Correcting two samples for GC content before comparing them handles well with both within-sample and between-sample biases, making it great for comparing cancer vs. healthy. However, it’s more complex and time-consuming, requiring extra computational resources.
+
+- When we want to take a look on application to other chromosomal areas,and if our analysis is correct, we believe that the two-sample method revealed the 28.75M area, which we probably would not have found without it. The problem with these methods is that we are not sure if the elimination of the 26.8M area as a problematic area, which we identified in the first method, is a correct elimination.
+
+## Short summary
+
+This week’s lab really emphasizes the importance of choosing the estimation model that we believe is most relevant to our case.
+
+For example, in the 28.75M area, we can’t say for sure that it’s an area with a shortage of helices if we are not completely sure of our process, our assumptions, and our estimation model.
+
