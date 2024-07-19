@@ -1,0 +1,240 @@
+---
+title: "Copy number in two regions of chromosome 1"
+author: "Ido Shalom, Daniel Rodan, Sagi Levin"
+date: " 23 July, 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Clear desk
+rm(list=ls())
+
+```
+
+
+### Libraries used
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Load libraries
+library("ggplot2")
+library("data.table")
+library("tictoc")
+library("manipulate")
+library(tidyverse)
+library(fitdistrplus)
+library(dplyr)
+library(ggthemes) 
+library(scales)
+library(gridExtra)
+library(splines)
+library(knitr)
+```
+
+### Paths and Data
+
+
+```{r paths}
+# Loading file path where the cancer data is stored 
+load(file = 'data/reads_100_A1.rda')
+
+# Loading file path where the health data is stored
+load(file = 'data/reads_100_B1.rda')
+
+# Load the data for GC count
+load(file = 'data/GC_100.rda')
+```
+
+
+## Setup - Preliminary part 
+
+To make the process easier, we added 0 values to each file to represent 0 reads in a cell or 0 GC count in every cell. This is only for the purpose of ensuring equal cell size along the entire 250M length of the chromosome.
+
+We will eventually clean the data and remove outliers so that the illogical parts (0 GC count in every cell) will not matter.
+
+As requested, we created 100k cells for the cancer sample and healthy sample, each cell containing 2.5k bases, and did the same for the GC content.
+
+```{r}
+# Pad each dataset with zeros to reach 2.5 million elements
+desired_length <- 2500000
+
+# Function to pad a vector with zeros
+pad_with_zeros <- function(data, desired_length) {
+  current_length <- length(data)
+  if (current_length < desired_length) {
+    data <- c(data, rep(0, desired_length - current_length))
+  }
+  return(data)
+}
+
+# Apply padding to each dataset
+GC_100 <- pad_with_zeros(GC_100, desired_length)
+reads_100_A1 <- pad_with_zeros(reads_100_A1, desired_length)
+reads_100_B1 <- pad_with_zeros(reads_100_B1, desired_length)
+
+
+# Function to sum every 'n' elements into a new vector
+sum_every_n <- function(data, n) {
+  new_length <- length(data) %/% n
+  new_data <- numeric(new_length)
+  for (i in 1:new_length) {
+    start_idx <- (i - 1) * n + 1
+    end_idx <- i * n
+    new_data[i] <- sum(data[start_idx:end_idx])
+  }
+  return(new_data)
+}
+
+# Sum every 25 elements for each dataset
+new_GC_100 <- (sum_every_n(GC_100, 25))/25
+new_reads_100_A1 <- sum_every_n(reads_100_A1, 25)
+new_reads_100_B1 <- sum_every_n(reads_100_B1, 25)
+
+```
+
+
+## Part A - simple med correction vs location 
+
+Before we begin with our methods, we need to create the partition of the data that separates the 25M - 30M region in terms of cells and the 75M - 80M region in terms of cells.
+
+We calculated and found:
+
+25M - 30M location on the chromosome -> 10K - 12K cells
+
+75M - 80M location on the chromosome -> 30K - 32K cells
+
+
+```{r}
+# Create the 25M - 30M location dataset
+loc_GC_100_A <- new_GC_100[10000:11999]
+loc_reads_A1_A <- new_reads_100_A1[10000:11999]
+loc_reads_B1_A <- new_reads_100_B1[10000:11999]
+
+
+loc_25m_30m <- data.frame(
+  GC_Content = loc_GC_100_A,
+  Reads_A1 = loc_reads_A1_A,
+  Reads_B1 = loc_reads_B1_A
+)
+
+
+# Create the 75M - 80M location dataset
+loc_GC_100_B <- new_GC_100[30000:31999]
+loc_reads_A1_B <- new_reads_100_A1[30000:31999]
+loc_reads_B1_B <- new_reads_100_B1[30000:31999]
+
+
+loc_75m_80m <- data.frame(
+  GC_Content = loc_GC_100_B,
+  Reads_A1 = loc_reads_A1_B,
+  Reads_B1 = loc_reads_B1_B
+)
+```
+
+
+### Question 1 - Just Median Correction :
+
+
+```{r}
+# Just med correction to 25m - 30m health
+loc_25m_30m$med_cor_health <- loc_25m_30m$Reads_B1 / median(loc_25m_30m$Reads_B1)
+
+# Just med correction to 25m - 30m cancer
+loc_25m_30m$med_cor_cancer <- loc_25m_30m$Reads_A1 / median(loc_25m_30m$Reads_A1)
+
+# Prepare the data for plotting
+loc_25m_30m$Index <- 1:nrow(loc_25m_30m)
+
+# Set up the plotting layout to have 2 rows and 1 column
+par(mfrow = c(2, 1), mar = c(4, 4, 2, 2))  # Adjust margins to reduce them
+
+# Plot health 
+plot(loc_25m_30m$Index, loc_25m_30m$med_cor_health, ylim = c(0, 2), pch = 16, col = "black",
+     xlab = "Cells Index (25M-30M)", ylab = "Reads (Med Correction)", xlim = c(0, 2000), cex = 0.3)
+# Add a horizontal line at y = 1 for reference
+abline(h = 1, col = "green")
+# Add text label
+text(500, 1.9, "Health", pos = 4, cex = 1.2, col = "steelblue")
+
+# Plot cancer 
+plot(loc_25m_30m$Index, loc_25m_30m$med_cor_cancer, ylim = c(0, 2), pch = 16, col = "black",
+     xlab = "Cells Index (25M-30M)", ylab = "Reads (Med Correction)", xlim = c(0, 2000), cex = 0.3)
+# Add a horizontal line at y = 1 for reference
+abline(h = 1, col = "green")
+# Add text label
+text(500, 1.9, "Cancer", pos = 4, cex = 1.2, col = "coral")
+
+```
+
+
+
+
+### Question 2 - One sample:
+
+
+```{r}
+# Fit spline regression models 
+healthy_spline_segment <- lm(loc_25m_30m$med_cor_health ~ ns(GC_Content, df = 3), data = loc_25m_30m)
+cancer_spline_segment <- lm(loc_25m_30m$med_cor_cancer ~ ns(GC_Content, df = 3), data = loc_25m_30m)
+
+# Generate predictions 
+predicted_gc_segment <- seq(0.25,0.65, length.out = 1000)
+predicted_healthy_reads_segment <- predict(healthy_spline_segment, newdata = data.frame(GC_Content = predicted_gc_segment))
+predicted_cancer_reads_segment <- predict(cancer_spline_segment, newdata = data.frame(GC_Content = predicted_gc_segment))
+
+
+# plot for healthy sample 
+p1_segment <- ggplot() +
+  geom_point(aes(x = loc_25m_30m$GC_Content, y = loc_25m_30m$med_cor_health), alpha = 0.2, size = 0.5, color = "blue") +
+  geom_line(aes(x = predicted_gc_segment, y = predicted_healthy_reads_segment), color = "black") +
+  labs(title = "Healthy Sample (25M - 30M bases)", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25,0.65) +
+  ylim(0,2)
+
+# plot for cancer sample 
+p2_segment <- ggplot() +
+  geom_point(aes(x = loc_25m_30m$GC_Content, y = loc_25m_30m$med_cor_cancer), alpha = 0.2, size = 0.5, color = "orange") +
+  geom_line(aes(x = predicted_gc_segment, y = predicted_cancer_reads_segment), color = "black") +
+  labs(title = "Cancer Sample (25M - 30M bases)", 
+       x = "GC Content", 
+       y = "Number of Copies") +
+  xlim(0.25,0.65) +
+  ylim(0,2)
+
+# Plot side by side
+grid.arrange(p1_segment, p2_segment, ncol = 2)
+```
+
+
+```{r}
+# Combine predictions for visual comparison
+combined_df <- data.frame(
+  GC_content = rep(predicted_gc_segment, 2),
+  Predicted_Reads = c(predicted_healthy_reads_segment, predicted_cancer_reads_segment),
+  Sample = rep(c("Healthy", "Cancer"), each = length(predicted_gc_segment))
+)
+
+# Create combined plot
+ggplot(combined_df, aes(x = GC_content, y = Predicted_Reads, color = Sample)) +
+  geom_line() +
+  labs(x = "GC Content",
+       y = "Reads (Med Correction)") +
+  scale_color_manual(values = c("Healthy" = "blue", "Cancer" = "orange")) +
+  ylim(0.25, 1.25) +
+  theme_minimal()
+```
+
+
+
+
+
+
