@@ -1,0 +1,6 @@
+*_cache/
+*_files/
+*.knit.md
+.Rhistory
+.RData
+data/raw/
